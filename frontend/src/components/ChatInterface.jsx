@@ -46,6 +46,34 @@ export default function ChatInterface({
     }
   };
 
+  const copyToClipboard = async (text, label = 'Content') => {
+    try {
+      await navigator.clipboard.writeText(text);
+      // Could show a toast here, but for now we'll just rely on user action
+    } catch (err) {
+      console.error('Failed to copy:', err);
+    }
+  };
+
+  const formatThreadMarkdown = () => {
+    if (!conversation?.messages) return '';
+    
+    return conversation.messages.map((msg, index) => {
+      const role = msg.role === 'user' ? 'USER' : 'LLM COUNCIL';
+      let content = msg.content || '';
+      
+      if (msg.role === 'assistant') {
+        if (msg.stage3) {
+          content = typeof msg.stage3 === 'string' ? msg.stage3 : msg.stage3.response || JSON.stringify(msg.stage3);
+        } else if (msg.stage1) {
+          content = '(Incomplete response)';
+        }
+      }
+      
+      return `### Message ${index} - ${role}\n\n${content}\n`;
+    }).join('\n---\n\n');
+  };
+
   if (!conversation) {
     return (
       <div className="chat-interface">
@@ -59,6 +87,31 @@ export default function ChatInterface({
 
   return (
     <div className="chat-interface">
+      <div className="chat-header">
+        <div className="header-info">
+          <h3 className="header-title">{conversation.title || 'New Conversation'}</h3>
+          <div className="header-meta">
+            <span>ID: {conversation.id}</span>
+            <button 
+              className="copy-id-btn"
+              onClick={() => copyToClipboard(conversation.id, 'ID')}
+              title="Copy ID"
+            >
+              (Copy)
+            </button>
+          </div>
+        </div>
+        <div className="header-actions">
+          <button 
+            className="secondary-button"
+            onClick={() => copyToClipboard(formatThreadMarkdown(), 'Thread')}
+            title="Copy full thread as Markdown"
+          >
+            Copy Thread
+          </button>
+        </div>
+      </div>
+
       <div className="messages-container" ref={messagesContainerRef}>
         {conversation.messages.length === 0 ? (
           <div className="empty-state">
@@ -70,7 +123,18 @@ export default function ChatInterface({
             <div key={index} className="message-group">
               {msg.role === 'user' ? (
                 <div className="user-message">
-                  <div className="message-label">You</div>
+                  <div className="message-header">
+                    <div className="message-label">You</div>
+                    <div className="message-meta">
+                      <span className="message-id">Msg #{index}</span>
+                      <button 
+                        className="message-action"
+                        onClick={() => copyToClipboard(msg.content)}
+                      >
+                        Copy
+                      </button>
+                    </div>
+                  </div>
                   <div className="message-content">
                     <div className="markdown-content">
                       <ReactMarkdown>{msg.content}</ReactMarkdown>
@@ -79,7 +143,24 @@ export default function ChatInterface({
                 </div>
               ) : (
                 <div className="assistant-message">
-                  <div className="message-label">LLM Council</div>
+                  <div className="message-header">
+                    <div className="message-label">LLM Council</div>
+                    <div className="message-meta">
+                      <span className="message-id">Msg #{index}</span>
+                      <button 
+                        className="message-action"
+                        onClick={() => {
+                          const content = msg.stage3 
+                            ? (typeof msg.stage3 === 'string' ? msg.stage3 : msg.stage3.response)
+                            : '';
+                          if (content) copyToClipboard(content);
+                        }}
+                        disabled={!msg.stage3}
+                      >
+                        Copy Final
+                      </button>
+                    </div>
+                  </div>
 
                   {/* Stage 1 */}
                   {msg.loading?.stage1 && (
