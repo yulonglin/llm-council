@@ -49,13 +49,28 @@ def _read_json(path: str) -> Optional[Dict[str, Any]]:
         return json.load(f)
 
 
+def _ensure_defaults(conversation: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+    """Ensure optional fields exist for backward compatibility."""
+    if conversation is None:
+        return None
+    conversation.setdefault("title", "New Conversation")
+    conversation.setdefault("messages", [])
+    conversation.setdefault("pinned", False)
+    conversation.setdefault("archived", False)
+    conversation.setdefault("draft", "")
+    return conversation
+
+
 def create_conversation(conversation_id: str) -> Dict[str, Any]:
     """Create a new conversation and return it."""
     conversation = {
         "id": conversation_id,
         "created_at": datetime.utcnow().isoformat(),
         "title": "New Conversation",
-        "messages": []
+        "messages": [],
+        "pinned": False,
+        "archived": False,
+        "draft": ""
     }
     with _get_lock(conversation_id):
         _write_json(_get_path(conversation_id), conversation)
@@ -64,24 +79,48 @@ def create_conversation(conversation_id: str) -> Dict[str, Any]:
 
 def get_conversation(conversation_id: str) -> Optional[Dict[str, Any]]:
     """Load a conversation from storage, or None if not found."""
-    return _read_json(_get_path(conversation_id))
+    return _ensure_defaults(_read_json(_get_path(conversation_id)))
 
 
-def list_conversations() -> List[Dict[str, Any]]:
-    """List all conversations (metadata only), sorted newest first."""
+def _should_prune_empty(conversation: Dict[str, Any]) -> bool:
+    """Return True if the conversation is an empty placeholder with no draft."""
+    messages = conversation.get("messages", [])
+    draft = (conversation.get("draft") or "").strip()
+    return (
+        len(messages) == 0
+        and draft == ""
+        and not conversation.get("pinned", False)
+        and not conversation.get("archived", False)
+    )
+
+
+def list_conversations(include_archived: bool = False) -> List[Dict[str, Any]]:
+    """List all conversations (metadata only), sorted pinned first then newest."""
     conversations = []
     for filename in os.listdir(DATA_DIR):
         if not filename.endswith('.json'):
             continue
-        data = _read_json(os.path.join(DATA_DIR, filename))
+        data = _ensure_defaults(_read_json(os.path.join(DATA_DIR, filename)))
         if data:
+            if _should_prune_empty(data):
+                try:
+                    delete_conversation(data["id"])
+                except Exception:
+                    pass
+                continue
+            if data.get("archived", False) and not include_archived:
+                continue
             conversations.append({
                 "id": data["id"],
                 "created_at": data["created_at"],
                 "title": data.get("title", "New Conversation"),
-                "message_count": len(data["messages"])
+                "message_count": len(data["messages"]),
+                "pinned": data.get("pinned", False),
+                "archived": data.get("archived", False),
+                "has_draft": bool((data.get("draft") or "").strip())
             })
     conversations.sort(key=lambda x: x["created_at"], reverse=True)
+    conversations.sort(key=lambda x: x.get("pinned", False), reverse=True)
     return conversations
 
 
@@ -94,7 +133,7 @@ def _load_and_save(conversation_id: str, modifier: Callable[[Dict[str, Any]], T]
     """
     path = _get_path(conversation_id)
     with _get_lock(conversation_id):
-        conversation = _read_json(path)
+        conversation = _ensure_defaults(_read_json(path))
         if conversation is None:
             raise ValueError(f"Conversation {conversation_id} not found")
         result = modifier(conversation)
@@ -106,6 +145,7 @@ def add_user_message(conversation_id: str, content: str) -> None:
     """Add a user message to a conversation."""
     def modifier(conv):
         conv["messages"].append({"role": "user", "content": content})
+        conv["draft"] = ""
     _load_and_save(conversation_id, modifier)
 
 
@@ -122,6 +162,7 @@ def add_user_message_atomic(conversation_id: str, content: str) -> bool:
     def modifier(conv):
         is_first = len(conv["messages"]) == 0
         conv["messages"].append({"role": "user", "content": content})
+        conv["draft"] = ""
         return is_first
     return _load_and_save(conversation_id, modifier)
 
@@ -175,3 +216,28 @@ def update_conversation_title(conversation_id: str, title: str) -> None:
     def modifier(conv):
         conv["title"] = title
     _load_and_save(conversation_id, modifier)
+
+
+def update_conversation_fields(conversation_id: str, **updates) -> Dict[str, Any]:
+    """Update allowed conversation fields and return the updated conversation."""
+    allowed = {"title", "pinned", "archived", "draft"}
+    fields = {k: v for k, v in updates.items() if k in allowed and v is not None}
+
+    if fields.get("archived") is True and "pinned" not in fields:
+        fields["pinned"] = False
+
+    def modifier(conv):
+        conv.update(fields)
+        return conv
+    return _load_and_save(conversation_id, modifier)
+
+
+def delete_conversation(conversation_id: str) -> None:
+    """Delete a conversation and its lock file if present."""
+    path = _get_path(conversation_id)
+    lock_path = path + ".lock"
+    with _get_lock(conversation_id):
+        if os.path.exists(path):
+            os.remove(path)
+    if os.path.exists(lock_path):
+        os.remove(lock_path)

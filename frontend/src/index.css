@@ -31,6 +31,8 @@ body {
 /* Global markdown styling */
 .markdown-content {
   padding: 12px;
+  overflow-wrap: anywhere;
+  word-break: break-word;
 }
 
 .markdown-content p {

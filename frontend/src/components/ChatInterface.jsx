@@ -8,24 +8,33 @@ import './ChatInterface.css';
 export default function ChatInterface({
   conversation,
   onSendMessage,
+  onDraftChange,
   isLoading,
 }) {
   const [input, setInput] = useState('');
-  const messagesEndRef = useRef(null);
+  const messagesContainerRef = useRef(null);
 
   const scrollToBottom = () => {
-    messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+    if (messagesContainerRef.current) {
+      messagesContainerRef.current.scrollTop =
+        messagesContainerRef.current.scrollHeight;
+    }
   };
 
   useEffect(() => {
     scrollToBottom();
   }, [conversation]);
 
+  useEffect(() => {
+    setInput(conversation?.draft || '');
+  }, [conversation?.id]);
+
   const handleSubmit = (e) => {
     e.preventDefault();
     if (input.trim() && !isLoading) {
       onSendMessage(input);
       setInput('');
+      onDraftChange?.('');
     }
   };
 
@@ -50,7 +59,7 @@ export default function ChatInterface({
 
   return (
     <div className="chat-interface">
-      <div className="messages-container">
+      <div className="messages-container" ref={messagesContainerRef}>
         {conversation.messages.length === 0 ? (
           <div className="empty-state">
             <h2>Start a conversation</h2>
@@ -117,7 +126,6 @@ export default function ChatInterface({
           </div>
         )}
 
-        <div ref={messagesEndRef} />
       </div>
 
       {conversation.messages.length === 0 && (
@@ -126,7 +134,10 @@ export default function ChatInterface({
             className="message-input"
             placeholder="Ask your question... (Shift+Enter for new line, Enter to send)"
             value={input}
-            onChange={(e) => setInput(e.target.value)}
+            onChange={(e) => {
+              setInput(e.target.value);
+              onDraftChange?.(e.target.value);
+            }}
             onKeyDown={handleKeyDown}
             disabled={isLoading}
             rows={3}

@@ -8,8 +8,15 @@ export const api = {
   /**
    * List all conversations.
    */
-  async listConversations() {
-    const response = await fetch(`${API_BASE}/api/conversations`);
+  async listConversations({ includeArchived = false } = {}) {
+    const params = new URLSearchParams();
+    if (includeArchived) {
+      params.set('include_archived', 'true');
+    }
+    const query = params.toString();
+    const response = await fetch(
+      `${API_BASE}/api/conversations${query ? `?${query}` : ''}`
+    );
     if (!response.ok) {
       throw new Error('Failed to list conversations');
     }
@@ -42,6 +49,42 @@ export const api = {
     );
     if (!response.ok) {
       throw new Error('Failed to get conversation');
+    }
+    return response.json();
+  },
+
+  /**
+   * Update conversation metadata.
+   */
+  async updateConversation(conversationId, updates) {
+    const response = await fetch(
+      `${API_BASE}/api/conversations/${conversationId}`,
+      {
+        method: 'PATCH',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify(updates),
+      }
+    );
+    if (!response.ok) {
+      throw new Error('Failed to update conversation');
+    }
+    return response.json();
+  },
+
+  /**
+   * Delete a conversation.
+   */
+  async deleteConversation(conversationId) {
+    const response = await fetch(
+      `${API_BASE}/api/conversations/${conversationId}`,
+      {
+        method: 'DELETE',
+      }
+    );
+    if (!response.ok) {
+      throw new Error('Failed to delete conversation');
     }
     return response.json();
   },

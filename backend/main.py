@@ -4,7 +4,7 @@ from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Optional
 import uuid
 import json
 import asyncio
@@ -34,12 +34,23 @@ class SendMessageRequest(BaseModel):
     content: str
 
 
+class UpdateConversationRequest(BaseModel):
+    """Request to update conversation metadata."""
+    title: Optional[str] = None
+    pinned: Optional[bool] = None
+    archived: Optional[bool] = None
+    draft: Optional[str] = None
+
+
 class ConversationMetadata(BaseModel):
     """Conversation metadata for list view."""
     id: str
     created_at: str
     title: str
     message_count: int
+    pinned: bool
+    archived: bool
+    has_draft: bool
 
 
 class Conversation(BaseModel):
@@ -48,6 +59,9 @@ class Conversation(BaseModel):
     created_at: str
     title: str
     messages: List[Dict[str, Any]]
+    pinned: bool
+    archived: bool
+    draft: str
 
 
 @app.get("/")
@@ -57,9 +71,9 @@ async def root():
 
 
 @app.get("/api/conversations", response_model=List[ConversationMetadata])
-async def list_conversations():
+async def list_conversations(include_archived: bool = False):
     """List all conversations (metadata only)."""
-    return storage.list_conversations()
+    return storage.list_conversations(include_archived=include_archived)
 
 
 @app.post("/api/conversations", response_model=Conversation)
@@ -77,6 +91,30 @@ async def get_conversation(conversation_id: str):
     if conversation is None:
         raise HTTPException(status_code=404, detail="Conversation not found")
     return conversation
+
+
+@app.patch("/api/conversations/{conversation_id}", response_model=Conversation)
+async def update_conversation(conversation_id: str, request: UpdateConversationRequest):
+    """Update conversation metadata (pinned, archived, draft, title)."""
+    if storage.get_conversation(conversation_id) is None:
+        raise HTTPException(status_code=404, detail="Conversation not found")
+    updated = storage.update_conversation_fields(
+        conversation_id,
+        title=request.title,
+        pinned=request.pinned,
+        archived=request.archived,
+        draft=request.draft
+    )
+    return updated
+
+
+@app.delete("/api/conversations/{conversation_id}")
+async def delete_conversation(conversation_id: str):
+    """Delete a conversation."""
+    if storage.get_conversation(conversation_id) is None:
+        raise HTTPException(status_code=404, detail="Conversation not found")
+    storage.delete_conversation(conversation_id)
+    return {"status": "deleted"}
 
 
 @app.post("/api/conversations/{conversation_id}/message")

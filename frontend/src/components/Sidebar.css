@@ -5,11 +5,15 @@
   display: flex;
   flex-direction: column;
   height: 100vh;
+  overflow-x: hidden;
 }
 
 .sidebar-header {
   padding: 16px;
   border-bottom: 1px solid #e0e0e0;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
 }
 
 .sidebar-header h1 {
@@ -36,9 +40,27 @@
   border-color: #357abd;
 }
 
+.toggle-archived-btn {
+  width: 100%;
+  padding: 8px;
+  background: #ffffff;
+  border: 1px solid #d0d0d0;
+  border-radius: 6px;
+  color: #333;
+  cursor: pointer;
+  font-size: 13px;
+  transition: background 0.2s, border-color 0.2s;
+}
+
+.toggle-archived-btn:hover {
+  background: #f3f3f3;
+  border-color: #c0c0c0;
+}
+
 .conversation-list {
   flex: 1;
   overflow-y: auto;
+  overflow-x: hidden;
   padding: 8px;
 }
 
@@ -53,8 +75,10 @@
   padding: 12px;
   margin-bottom: 4px;
   border-radius: 6px;
+  border: 1px solid transparent;
   cursor: pointer;
   transition: background 0.2s;
+  position: relative;
 }
 
 .conversation-item:hover {
@@ -66,13 +90,94 @@
   border: 1px solid #4a90e2;
 }
 
+.conversation-row {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 8px;
+  position: relative;
+}
+
+.conversation-info {
+  min-width: 0;
+  flex: 1;
+}
+
 .conversation-title {
+  display: block;
+  max-width: 100%;
   color: #333;
   font-size: 14px;
   margin-bottom: 4px;
+  white-space: normal;
+  overflow-wrap: anywhere;
+  word-break: break-word;
 }
 
 .conversation-meta {
   color: #999;
   font-size: 12px;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+}
+
+.conversation-actions {
+  display: flex;
+  gap: 6px;
+  flex-shrink: 0;
+  position: absolute;
+  right: 8px;
+  top: 8px;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 0.2s;
+  z-index: 2;
+}
+
+.conversation-action {
+  border: 1px solid #d0d0d0;
+  background: #ffffff;
+  color: #555;
+  border-radius: 4px;
+  padding: 4px 5px;
+  font-size: 13px;
+  line-height: 1;
+  cursor: pointer;
+  transition: background 0.2s, border-color 0.2s;
+}
+
+.conversation-action:hover {
+  background: #f0f0f0;
+  border-color: #c0c0c0;
+}
+
+.conversation-action.danger {
+  color: #b42318;
+  border-color: #f5b9b1;
+  background: #fff5f4;
+}
+
+.conversation-action.danger:hover {
+  background: #ffe8e6;
+  border-color: #f2a59a;
+}
+
+.conversation-section {
+  padding: 8px 12px 4px;
+  color: #777;
+  font-size: 12px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.4px;
+}
+
+.conversation-item:hover .conversation-actions,
+.conversation-item.active .conversation-actions {
+  opacity: 1;
+  pointer-events: auto;
+}
+
+.conversation-item:hover .conversation-info,
+.conversation-item.active .conversation-info {
+  padding-right: 88px;
 }
