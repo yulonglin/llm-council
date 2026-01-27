@@ -79,6 +79,7 @@
   cursor: pointer;
   transition: background 0.2s;
   position: relative;
+  touch-action: manipulation;
 }
 
 .conversation-item:hover {
