@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef } from 'react';
-import ReactMarkdown from 'react-markdown';
+import Markdown from './Markdown';
 import Stage1 from './Stage1';
 import Stage2 from './Stage2';
 import Stage3 from './Stage3';
@@ -137,7 +137,7 @@ export default function ChatInterface({
                   </div>
                   <div className="message-content">
                     <div className="markdown-content">
-                      <ReactMarkdown>{msg.content}</ReactMarkdown>
+                      <Markdown>{msg.content}</Markdown>
                     </div>
                   </div>
                 </div>
@@ -175,14 +175,15 @@ export default function ChatInterface({
                   {msg.loading?.stage2 && (
                     <div className="stage-loading">
                       <div className="spinner"></div>
-                      <span>Running Stage 2: Peer rankings...</span>
+                      <span>Running Stage 2: Peer scoring...</span>
                     </div>
                   )}
                   {msg.stage2 && (
                     <Stage2
-                      rankings={msg.stage2}
+                      evaluations={msg.stage2}
+                      axes={msg.axes || msg.metadata?.axes}
                       labelToModel={msg.metadata?.label_to_model}
-                      aggregateRankings={msg.metadata?.aggregate_rankings}
+                      aggregateScores={msg.metadata?.aggregate_scores}
                     />
                   )}
 

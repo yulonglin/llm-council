@@ -1,8 +1,13 @@
 """OpenRouter API client for making LLM requests."""
 
+import os
 import httpx
 from typing import List, Dict, Any, Optional
 from .config import OPENROUTER_API_KEY, OPENROUTER_API_URL
+from . import cache
+
+# Set LLM_CACHE=0 to disable caching
+CACHE_ENABLED = os.getenv("LLM_CACHE", "1") != "0"
 
 
 async def query_model(
@@ -21,6 +26,12 @@ async def query_model(
     Returns:
         Response dict with 'content' and optional 'reasoning_details', or None if failed
     """
+    # Check cache first
+    if CACHE_ENABLED:
+        cached = cache.get(model, messages)
+        if cached is not None:
+            return cached
+
     headers = {
         "Authorization": f"Bearer {OPENROUTER_API_KEY}",
         "Content-Type": "application/json",
@@ -32,7 +43,9 @@ async def query_model(
     }
 
     try:
-        async with httpx.AsyncClient(timeout=timeout) as client:
+        # Use ALL_PROXY (socks5h) if set, otherwise no proxy
+        proxy = os.getenv("ALL_PROXY") or None
+        async with httpx.AsyncClient(timeout=timeout, proxy=proxy) as client:
             response = await client.post(
                 OPENROUTER_API_URL,
                 headers=headers,
@@ -43,10 +56,16 @@ async def query_model(
             data = response.json()
             message = data['choices'][0]['message']
 
-            return {
+            result = {
                 'content': message.get('content'),
                 'reasoning_details': message.get('reasoning_details')
             }
+
+            # Cache successful responses
+            if CACHE_ENABLED:
+                cache.put(model, messages, result)
+
+            return result
 
     except Exception as e:
         print(f"Error querying model {model}: {e}")

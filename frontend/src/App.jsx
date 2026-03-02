@@ -316,6 +316,15 @@ function App() {
             });
             break;
 
+          case 'axes_complete':
+            setCurrentConversation((prev) => {
+              const messages = [...prev.messages];
+              const lastMsg = messages[messages.length - 1];
+              lastMsg.axes = event.data;
+              return { ...prev, messages };
+            });
+            break;
+
           case 'stage2_start':
             setCurrentConversation((prev) => {
               const messages = [...prev.messages];

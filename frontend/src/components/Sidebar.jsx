@@ -1,3 +1,4 @@
+import { useState } from 'react';
 import './Sidebar.css';
 
 export default function Sidebar({
@@ -12,9 +13,19 @@ export default function Sidebar({
   onToggleArchivedView,
   width,
 }) {
-  const pinned = conversations.filter((conv) => conv.pinned && !conv.archived);
-  const unpinned = conversations.filter((conv) => !conv.pinned && !conv.archived);
-  const archived = conversations.filter((conv) => conv.archived);
+  const [searchQuery, setSearchQuery] = useState('');
+
+  const filtered = searchQuery.trim()
+    ? conversations.filter((conv) =>
+        (conv.title || 'New Conversation')
+          .toLowerCase()
+          .includes(searchQuery.trim().toLowerCase())
+      )
+    : conversations;
+
+  const pinned = filtered.filter((conv) => conv.pinned && !conv.archived);
+  const unpinned = filtered.filter((conv) => !conv.pinned && !conv.archived);
+  const archived = filtered.filter((conv) => conv.archived);
 
   const renderConversation = (conv) => (
     <div
@@ -97,11 +108,20 @@ export default function Sidebar({
         >
           {showArchived ? 'Hide Archived' : 'Show Archived'}
         </button>
+        <input
+          type="text"
+          className="search-input"
+          placeholder="Search conversations..."
+          value={searchQuery}
+          onChange={(e) => setSearchQuery(e.target.value)}
+        />
       </div>
 
       <div className="conversation-list">
-        {conversations.length === 0 ? (
-          <div className="no-conversations">No conversations yet</div>
+        {filtered.length === 0 ? (
+          <div className="no-conversations">
+            {searchQuery.trim() ? 'No matching conversations' : 'No conversations yet'}
+          </div>
         ) : (
           <>
             {pinned.length > 0 && (

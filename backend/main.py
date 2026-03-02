@@ -9,8 +9,64 @@ import uuid
 import json
 import asyncio
 
+from pathlib import Path
+import time as _time
+
 from . import storage
-from .council import run_full_council, generate_conversation_title, stage1_collect_responses, stage2_collect_rankings, stage3_synthesize_final, calculate_aggregate_rankings
+from .council import (
+    run_full_council, generate_conversation_title,
+    stage1_collect_responses, stage2a_select_axes, stage2b_collect_scores,
+    stage3_synthesize_final, calculate_aggregate_scores
+)
+
+COUNCIL_RUNS_DIR = Path("data/council_runs")
+
+
+def save_council_markdown(
+    query: str,
+    stage1_results: list,
+    stage2_results: list,
+    stage3_result: dict,
+    metadata: dict,
+) -> str:
+    """Save a council run as markdown. Returns the output file path."""
+    COUNCIL_RUNS_DIR.mkdir(parents=True, exist_ok=True)
+    ts = _time.strftime("%Y%m%d_%H%M%S")
+    out_path = COUNCIL_RUNS_DIR / f"run_{ts}.md"
+
+    axes = metadata.get("axes", [])
+    aggregate_scores = metadata.get("aggregate_scores", [])
+    axis_names = [a["name"] for a in axes]
+
+    lines = [
+        f"# LLM Council Run — {ts}\n",
+        f"**Query:** {query[:200]}{'...' if len(query) > 200 else ''}\n",
+    ]
+
+    if axis_names and aggregate_scores:
+        lines.append("## Aggregate Scores\n")
+        lines.append(f"| Model | {' | '.join(axis_names)} | Overall |")
+        lines.append(f"|{'|'.join(['---'] * (len(axis_names) + 2))}|")
+        for agg in aggregate_scores:
+            short = agg["model"].split("/")[-1]
+            scores = [str(agg["axis_scores"].get(n, "N/A")) for n in axis_names]
+            lines.append(f"| {short} | {' | '.join(scores)} | {agg['overall_score']} |")
+        lines.append("")
+
+    lines.append("\n---\n")
+    lines.append("## Final Synthesis\n")
+    lines.append(stage3_result.get("response", ""))
+
+    lines.append("\n---\n")
+    lines.append("## Individual Responses\n")
+    for r in stage1_results:
+        short = r["model"].split("/")[-1]
+        lines.append(f"<details>\n<summary>{short}</summary>\n")
+        lines.append(r.get("response", ""))
+        lines.append("\n</details>\n")
+
+    out_path.write_text("\n".join(lines))
+    return str(out_path)
 
 app = FastAPI(title="LLM Council API")
 
@@ -148,12 +204,18 @@ async def send_message(conversation_id: str, request: SendMessageRequest):
         stage3_result
     )
 
+    # Save markdown output
+    md_path = save_council_markdown(
+        request.content, stage1_results, stage2_results, stage3_result, metadata
+    )
+
     # Return the complete response with metadata
     return {
         "stage1": stage1_results,
         "stage2": stage2_results,
         "stage3": stage3_result,
-        "metadata": metadata
+        "metadata": metadata,
+        "markdown_path": md_path,
     }
 
 
@@ -191,26 +253,41 @@ async def send_message_stream(conversation_id: str, request: SendMessageRequest)
             )
             yield f"data: {json.dumps({'type': 'stage1_complete', 'data': stage1_results})}\n\n"
 
-            # Stage 2: Collect rankings
+            # Stage 2a: Chairman selects evaluation axes
+            axes = await stage2a_select_axes(request.content)
+            storage.update_assistant_message(
+                conversation_id, msg_index,
+                axes=axes
+            )
+            yield f"data: {json.dumps({'type': 'axes_complete', 'data': axes})}\n\n"
+
+            # Stage 2b: Collect scores
             yield f"data: {json.dumps({'type': 'stage2_start'})}\n\n"
-            stage2_results, label_to_model = await stage2_collect_rankings(request.content, stage1_results)
-            aggregate_rankings = calculate_aggregate_rankings(stage2_results, label_to_model)
+            stage2_results, label_to_model = await stage2b_collect_scores(request.content, stage1_results, axes)
+            aggregate_scores = calculate_aggregate_scores(stage2_results, label_to_model, axes)
             # Save incrementally after stage 2
             storage.update_assistant_message(
                 conversation_id, msg_index,
                 stage2=stage2_results, status="stage2_complete"
             )
-            yield f"data: {json.dumps({'type': 'stage2_complete', 'data': stage2_results, 'metadata': {'label_to_model': label_to_model, 'aggregate_rankings': aggregate_rankings}})}\n\n"
+            yield f"data: {json.dumps({'type': 'stage2_complete', 'data': stage2_results, 'metadata': {'label_to_model': label_to_model, 'axes': axes, 'aggregate_scores': aggregate_scores}})}\n\n"
 
             # Stage 3: Synthesize final answer
             yield f"data: {json.dumps({'type': 'stage3_start'})}\n\n"
-            stage3_result = await stage3_synthesize_final(request.content, stage1_results, stage2_results)
+            stage3_result = await stage3_synthesize_final(request.content, stage1_results, stage2_results, axes, aggregate_scores)
             # Save incrementally after stage 3 (complete)
             storage.update_assistant_message(
                 conversation_id, msg_index,
                 stage3=stage3_result, status="complete"
             )
             yield f"data: {json.dumps({'type': 'stage3_complete', 'data': stage3_result})}\n\n"
+
+            # Save markdown output
+            metadata = {'axes': axes, 'aggregate_scores': aggregate_scores, 'label_to_model': label_to_model}
+            md_path = save_council_markdown(
+                request.content, stage1_results, stage2_results, stage3_result, metadata
+            )
+            yield f"data: {json.dumps({'type': 'markdown_saved', 'data': {'path': md_path}})}\n\n"
 
             # Wait for title generation if it was started
             if title_task:

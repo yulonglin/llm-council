@@ -182,3 +182,24 @@
 .conversation-item.active .conversation-info {
   padding-right: 88px;
 }
+
+.search-input {
+  width: 100%;
+  padding: 8px 10px;
+  border: 1px solid #d0d0d0;
+  border-radius: 6px;
+  font-size: 13px;
+  color: #333;
+  background: #ffffff;
+  outline: none;
+  transition: border-color 0.2s;
+  box-sizing: border-box;
+}
+
+.search-input:focus {
+  border-color: #4a90e2;
+}
+
+.search-input::placeholder {
+  color: #aaa;
+}
