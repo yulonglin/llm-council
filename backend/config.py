@@ -12,7 +12,7 @@ OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY")
 COUNCIL_MODELS = [
     "openai/gpt-5.2-pro",
     "anthropic/claude-opus-4.6",
-    "google/gemini-3-pro-preview",
+    "google/gemini-3.1-pro-preview",
 ]
 
 # Chairman model - synthesizes final response

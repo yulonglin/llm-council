@@ -14,9 +14,15 @@ import time as _time
 
 from . import storage
 from .council import (
-    run_full_council, generate_conversation_title,
-    stage1_collect_responses, stage2a_select_axes, stage2b_collect_scores,
-    stage3_synthesize_final, calculate_aggregate_scores
+    run_full_council,
+    generate_conversation_title,
+    stage0_analyze_query,
+    stage0_rewrite_with_answers,
+    stage1_collect_responses,
+    stage2a_select_axes,
+    stage2b_collect_scores,
+    stage3_synthesize_final,
+    calculate_aggregate_scores,
 )
 
 COUNCIL_RUNS_DIR = Path("data/council_runs")
@@ -68,6 +74,7 @@ def save_council_markdown(
     out_path.write_text("\n".join(lines))
     return str(out_path)
 
+
 app = FastAPI(title="LLM Council API")
 
 # Enable CORS for local development
@@ -82,16 +89,19 @@ app.add_middleware(
 
 class CreateConversationRequest(BaseModel):
     """Request to create a new conversation."""
+
     pass
 
 
 class SendMessageRequest(BaseModel):
     """Request to send a message in a conversation."""
+
     content: str
 
 
 class UpdateConversationRequest(BaseModel):
     """Request to update conversation metadata."""
+
     title: Optional[str] = None
     pinned: Optional[bool] = None
     archived: Optional[bool] = None
@@ -100,6 +110,7 @@ class UpdateConversationRequest(BaseModel):
 
 class ConversationMetadata(BaseModel):
     """Conversation metadata for list view."""
+
     id: str
     created_at: str
     title: str
@@ -111,6 +122,7 @@ class ConversationMetadata(BaseModel):
 
 class Conversation(BaseModel):
     """Full conversation with all messages."""
+
     id: str
     created_at: str
     title: str
@@ -159,7 +171,7 @@ async def update_conversation(conversation_id: str, request: UpdateConversationR
         title=request.title,
         pinned=request.pinned,
         archived=request.archived,
-        draft=request.draft
+        draft=request.draft,
     )
     return updated
 
@@ -198,10 +210,7 @@ async def send_message(conversation_id: str, request: SendMessageRequest):
 
     # Add assistant message with all stages
     storage.add_assistant_message(
-        conversation_id,
-        stage1_results,
-        stage2_results,
-        stage3_result
+        conversation_id, stage1_results, stage2_results, stage3_result
     )
 
     # Save markdown output
@@ -219,13 +228,75 @@ async def send_message(conversation_id: str, request: SendMessageRequest):
     }
 
 
+async def _run_stages_1_through_3(conversation_id, msg_index, query, title_task):
+    """Async generator yielding SSE events for stages 1-3 of the council process."""
+    # Stage 1: Collect responses
+    yield f"data: {json.dumps({'type': 'stage1_start'})}\n\n"
+    stage1_results = await stage1_collect_responses(query)
+    storage.update_assistant_message(
+        conversation_id, msg_index, stage1=stage1_results, status="stage1_complete"
+    )
+    yield f"data: {json.dumps({'type': 'stage1_complete', 'data': stage1_results})}\n\n"
+
+    # Stage 2a: Chairman selects evaluation axes
+    axes = await stage2a_select_axes(query)
+    storage.update_assistant_message(conversation_id, msg_index, axes=axes)
+    yield f"data: {json.dumps({'type': 'axes_complete', 'data': axes})}\n\n"
+
+    # Stage 2b: Collect scores
+    yield f"data: {json.dumps({'type': 'stage2_start'})}\n\n"
+    stage2_results, label_to_model = await stage2b_collect_scores(
+        query, stage1_results, axes
+    )
+    aggregate_scores = calculate_aggregate_scores(stage2_results, label_to_model, axes)
+    storage.update_assistant_message(
+        conversation_id, msg_index, stage2=stage2_results, status="stage2_complete"
+    )
+    yield f"data: {json.dumps({'type': 'stage2_complete', 'data': stage2_results, 'metadata': {'label_to_model': label_to_model, 'axes': axes, 'aggregate_scores': aggregate_scores}})}\n\n"
+
+    # Stage 3: Synthesize final answer
+    yield f"data: {json.dumps({'type': 'stage3_start'})}\n\n"
+    stage3_result = await stage3_synthesize_final(
+        query, stage1_results, stage2_results, axes, aggregate_scores
+    )
+    storage.update_assistant_message(
+        conversation_id, msg_index, stage3=stage3_result, status="complete"
+    )
+    yield f"data: {json.dumps({'type': 'stage3_complete', 'data': stage3_result})}\n\n"
+
+    # Save markdown output
+    metadata = {
+        "axes": axes,
+        "aggregate_scores": aggregate_scores,
+        "label_to_model": label_to_model,
+    }
+    md_path = save_council_markdown(
+        query, stage1_results, stage2_results, stage3_result, metadata
+    )
+    yield f"data: {json.dumps({'type': 'markdown_saved', 'data': {'path': md_path}})}\n\n"
+
+    # Wait for title generation if it was started
+    if title_task:
+        title = await title_task
+        storage.update_conversation_title(conversation_id, title)
+        yield f"data: {json.dumps({'type': 'title_complete', 'data': {'title': title}})}\n\n"
+
+    # Send completion event
+    yield f"data: {json.dumps({'type': 'complete'})}\n\n"
+
+
+class ClarifyRequest(BaseModel):
+    """Request to send clarification answers."""
+
+    answers: List[Dict[str, str]]  # list of {"question": str, "answer": str}
+
+
 @app.post("/api/conversations/{conversation_id}/message/stream")
 async def send_message_stream(conversation_id: str, request: SendMessageRequest):
     """
-    Send a message and stream the 3-stage council process.
+    Send a message and stream the council process (Stage 0 + Stages 1-3).
     Returns Server-Sent Events as each stage completes.
     """
-    # Check if conversation exists (early validation before starting stream)
     if storage.get_conversation(conversation_id) is None:
         raise HTTPException(status_code=404, detail="Conversation not found")
 
@@ -233,85 +304,53 @@ async def send_message_stream(conversation_id: str, request: SendMessageRequest)
         msg_index = None
         title_task = None
         try:
-            # Add user message atomically and check if first (prevents race condition)
-            is_first_message = storage.add_user_message_atomic(conversation_id, request.content)
-
-            # Create assistant message placeholder BEFORE stage 1
+            is_first_message = storage.add_user_message_atomic(
+                conversation_id, request.content
+            )
             msg_index = storage.create_assistant_message(conversation_id)
 
-            # Start title generation in parallel (don't await yet)
             if is_first_message:
-                title_task = asyncio.create_task(generate_conversation_title(request.content))
+                title_task = asyncio.create_task(
+                    generate_conversation_title(request.content)
+                )
 
-            # Stage 1: Collect responses
-            yield f"data: {json.dumps({'type': 'stage1_start'})}\n\n"
-            stage1_results = await stage1_collect_responses(request.content)
-            # Save incrementally after stage 1
+            # Stage 0: Query analysis
+            yield f"data: {json.dumps({'type': 'stage0_start'})}\n\n"
+            stage0_result = await stage0_analyze_query(request.content)
             storage.update_assistant_message(
-                conversation_id, msg_index,
-                stage1=stage1_results, status="stage1_complete"
+                conversation_id, msg_index, stage0=stage0_result
             )
-            yield f"data: {json.dumps({'type': 'stage1_complete', 'data': stage1_results})}\n\n"
 
-            # Stage 2a: Chairman selects evaluation axes
-            axes = await stage2a_select_axes(request.content)
+            if stage0_result["needs_clarification"]:
+                storage.update_assistant_message(
+                    conversation_id, msg_index, status="awaiting_clarification"
+                )
+                yield f"data: {json.dumps({'type': 'clarification_needed', 'data': {'questions': stage0_result['questions']}})}\n\n"
+                yield f"data: {json.dumps({'type': 'complete'})}\n\n"
+                return
+
+            rewritten_query = stage0_result.get("rewritten_query") or request.content
             storage.update_assistant_message(
-                conversation_id, msg_index,
-                axes=axes
+                conversation_id, msg_index, rewritten_query=rewritten_query
             )
-            yield f"data: {json.dumps({'type': 'axes_complete', 'data': axes})}\n\n"
+            yield f"data: {json.dumps({'type': 'stage0_complete', 'data': {'rewritten_query': rewritten_query}})}\n\n"
 
-            # Stage 2b: Collect scores
-            yield f"data: {json.dumps({'type': 'stage2_start'})}\n\n"
-            stage2_results, label_to_model = await stage2b_collect_scores(request.content, stage1_results, axes)
-            aggregate_scores = calculate_aggregate_scores(stage2_results, label_to_model, axes)
-            # Save incrementally after stage 2
-            storage.update_assistant_message(
-                conversation_id, msg_index,
-                stage2=stage2_results, status="stage2_complete"
-            )
-            yield f"data: {json.dumps({'type': 'stage2_complete', 'data': stage2_results, 'metadata': {'label_to_model': label_to_model, 'axes': axes, 'aggregate_scores': aggregate_scores}})}\n\n"
-
-            # Stage 3: Synthesize final answer
-            yield f"data: {json.dumps({'type': 'stage3_start'})}\n\n"
-            stage3_result = await stage3_synthesize_final(request.content, stage1_results, stage2_results, axes, aggregate_scores)
-            # Save incrementally after stage 3 (complete)
-            storage.update_assistant_message(
-                conversation_id, msg_index,
-                stage3=stage3_result, status="complete"
-            )
-            yield f"data: {json.dumps({'type': 'stage3_complete', 'data': stage3_result})}\n\n"
-
-            # Save markdown output
-            metadata = {'axes': axes, 'aggregate_scores': aggregate_scores, 'label_to_model': label_to_model}
-            md_path = save_council_markdown(
-                request.content, stage1_results, stage2_results, stage3_result, metadata
-            )
-            yield f"data: {json.dumps({'type': 'markdown_saved', 'data': {'path': md_path}})}\n\n"
-
-            # Wait for title generation if it was started
-            if title_task:
-                title = await title_task
-                storage.update_conversation_title(conversation_id, title)
-                yield f"data: {json.dumps({'type': 'title_complete', 'data': {'title': title}})}\n\n"
-
-            # Send completion event
-            yield f"data: {json.dumps({'type': 'complete'})}\n\n"
+            # Stages 1-3
+            async for event in _run_stages_1_through_3(
+                conversation_id, msg_index, rewritten_query, title_task
+            ):
+                yield event
 
         except Exception as e:
-            # Mark the assistant message as errored if it was created
             if msg_index is not None:
                 try:
                     storage.update_assistant_message(
-                        conversation_id, msg_index,
-                        status="error", error=str(e)
+                        conversation_id, msg_index, status="error", error=str(e)
                     )
                 except Exception:
-                    pass  # Best effort - don't mask the original error
-            # Send error event
+                    pass
             yield f"data: {json.dumps({'type': 'error', 'message': str(e)})}\n\n"
         finally:
-            # Cancel title task if still running (e.g., client disconnected)
             if title_task and not title_task.done():
                 title_task.cancel()
                 try:
@@ -325,10 +364,91 @@ async def send_message_stream(conversation_id: str, request: SendMessageRequest)
         headers={
             "Cache-Control": "no-cache",
             "Connection": "keep-alive",
-        }
+        },
+    )
+
+
+@app.post("/api/conversations/{conversation_id}/clarify/stream")
+async def send_clarification_stream(conversation_id: str, request: ClarifyRequest):
+    """
+    Send clarification answers and continue the council process.
+    Returns Server-Sent Events for Stage 0 completion + Stages 1-3.
+    """
+    if storage.get_conversation(conversation_id) is None:
+        raise HTTPException(status_code=404, detail="Conversation not found")
+
+    async def event_generator():
+        title_task = None
+        try:
+            conv = storage.get_conversation(conversation_id)
+
+            # Find the last assistant message awaiting clarification
+            msg_index = None
+            for i in range(len(conv["messages"]) - 1, -1, -1):
+                msg = conv["messages"][i]
+                if (
+                    msg.get("role") == "assistant"
+                    and msg.get("status") == "awaiting_clarification"
+                ):
+                    msg_index = i
+                    break
+
+            if msg_index is None:
+                yield f"data: {json.dumps({'type': 'error', 'message': 'No message awaiting clarification'})}\n\n"
+                return
+
+            # Get original query from the user message just before
+            original_query = conv["messages"][msg_index - 1].get("content", "")
+            questions = (
+                conv["messages"][msg_index].get("stage0", {}).get("questions", [])
+            )
+
+            # Rewrite query with clarification answers
+            rewritten_query = await stage0_rewrite_with_answers(
+                original_query, questions, request.answers
+            )
+            storage.update_assistant_message(
+                conversation_id,
+                msg_index,
+                clarification_answers=request.answers,
+                rewritten_query=rewritten_query,
+            )
+            yield f"data: {json.dumps({'type': 'stage0_complete', 'data': {'rewritten_query': rewritten_query}})}\n\n"
+
+            # Start title generation if this is the first exchange
+            is_first = msg_index <= 1
+            if is_first:
+                title_task = asyncio.create_task(
+                    generate_conversation_title(original_query)
+                )
+
+            # Stages 1-3
+            async for event in _run_stages_1_through_3(
+                conversation_id, msg_index, rewritten_query, title_task
+            ):
+                yield event
+
+        except Exception as e:
+            yield f"data: {json.dumps({'type': 'error', 'message': str(e)})}\n\n"
+        finally:
+            if title_task and not title_task.done():
+                title_task.cancel()
+                try:
+                    await title_task
+                except asyncio.CancelledError:
+                    pass
+
+    return StreamingResponse(
+        event_generator(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+        },
     )
 
 
 if __name__ == "__main__":
     import uvicorn
+
     uvicorn.run(app, host="0.0.0.0", port=8001)

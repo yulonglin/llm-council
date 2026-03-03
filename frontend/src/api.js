@@ -155,4 +155,51 @@ export const api = {
       }
     }
   },
+
+  /**
+   * Send clarification answers and receive streaming updates.
+   * @param {string} conversationId - The conversation ID
+   * @param {Array<{question: string, answer: string}>} answers - The clarification answers
+   * @param {function} onEvent - Callback function for each event: (eventType, data) => void
+   * @returns {Promise<void>}
+   */
+  async sendClarificationStream(conversationId, answers, onEvent) {
+    const response = await fetch(
+      `${API_BASE}/api/conversations/${conversationId}/clarify/stream`,
+      {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({ answers }),
+      }
+    );
+
+    if (!response.ok) {
+      throw new Error('Failed to send clarification');
+    }
+
+    const reader = response.body.getReader();
+    const decoder = new TextDecoder();
+
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+
+      const chunk = decoder.decode(value);
+      const lines = chunk.split('\n');
+
+      for (const line of lines) {
+        if (line.startsWith('data: ')) {
+          const data = line.slice(6);
+          try {
+            const event = JSON.parse(data);
+            onEvent(event.type, event);
+          } catch (e) {
+            console.error('Failed to parse SSE event:', e);
+          }
+        }
+      }
+    }
+  },
 };

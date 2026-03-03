@@ -277,11 +277,15 @@ function App() {
       // Create a partial assistant message that will be updated progressively
       const assistantMessage = {
         role: 'assistant',
+        stage0: null,
+        rewrittenQuery: null,
+        clarificationQuestions: null,
         stage1: null,
         stage2: null,
         stage3: null,
         metadata: null,
         loading: {
+          stage0: false,
           stage1: false,
           stage2: false,
           stage3: false,
@@ -297,6 +301,39 @@ function App() {
       // Send message with streaming
       await api.sendMessageStream(currentConversationId, content, (eventType, event) => {
         switch (eventType) {
+          case 'stage0_start':
+            setCurrentConversation((prev) => {
+              const messages = [...prev.messages];
+              const lastMsg = { ...messages[messages.length - 1] };
+              lastMsg.loading = { ...lastMsg.loading, stage0: true };
+              messages[messages.length - 1] = lastMsg;
+              return { ...prev, messages };
+            });
+            break;
+
+          case 'stage0_complete':
+            setCurrentConversation((prev) => {
+              const messages = [...prev.messages];
+              const lastMsg = { ...messages[messages.length - 1] };
+              lastMsg.rewrittenQuery = event.data.rewritten_query;
+              lastMsg.loading = { ...lastMsg.loading, stage0: false };
+              messages[messages.length - 1] = lastMsg;
+              return { ...prev, messages };
+            });
+            break;
+
+          case 'clarification_needed':
+            setCurrentConversation((prev) => {
+              const messages = [...prev.messages];
+              const lastMsg = { ...messages[messages.length - 1] };
+              lastMsg.clarificationQuestions = event.data.questions;
+              lastMsg.loading = { ...lastMsg.loading, stage0: false };
+              messages[messages.length - 1] = lastMsg;
+              return { ...prev, messages };
+            });
+            setIsLoading(false);
+            break;
+
           case 'stage1_start':
             setCurrentConversation((prev) => {
               const messages = [...prev.messages];
@@ -395,6 +432,120 @@ function App() {
     }
   };
 
+  const handleClarificationSubmit = async (answers) => {
+    if (!currentConversationId) return;
+    setIsLoading(true);
+
+    // Clear clarification questions, show loading
+    setCurrentConversation((prev) => {
+      const messages = [...prev.messages];
+      const lastMsg = { ...messages[messages.length - 1] };
+      lastMsg.clarificationQuestions = null;
+      lastMsg.loading = { stage0: false, stage1: false, stage2: false, stage3: false };
+      messages[messages.length - 1] = lastMsg;
+      return { ...prev, messages };
+    });
+
+    try {
+      await api.sendClarificationStream(currentConversationId, answers, (eventType, event) => {
+        switch (eventType) {
+          case 'stage0_complete':
+            setCurrentConversation((prev) => {
+              const messages = [...prev.messages];
+              const lastMsg = { ...messages[messages.length - 1] };
+              lastMsg.rewrittenQuery = event.data.rewritten_query;
+              messages[messages.length - 1] = lastMsg;
+              return { ...prev, messages };
+            });
+            break;
+          case 'stage1_start':
+            setCurrentConversation((prev) => {
+              const messages = [...prev.messages];
+              const lastMsg = { ...messages[messages.length - 1] };
+              lastMsg.loading = { ...lastMsg.loading, stage1: true };
+              messages[messages.length - 1] = lastMsg;
+              return { ...prev, messages };
+            });
+            break;
+          case 'stage1_complete':
+            setCurrentConversation((prev) => {
+              const messages = [...prev.messages];
+              const lastMsg = { ...messages[messages.length - 1] };
+              lastMsg.stage1 = event.data;
+              lastMsg.loading = { ...lastMsg.loading, stage1: false };
+              messages[messages.length - 1] = lastMsg;
+              return { ...prev, messages };
+            });
+            break;
+          case 'axes_complete':
+            setCurrentConversation((prev) => {
+              const messages = [...prev.messages];
+              const lastMsg = { ...messages[messages.length - 1] };
+              lastMsg.axes = event.data;
+              messages[messages.length - 1] = lastMsg;
+              return { ...prev, messages };
+            });
+            break;
+          case 'stage2_start':
+            setCurrentConversation((prev) => {
+              const messages = [...prev.messages];
+              const lastMsg = { ...messages[messages.length - 1] };
+              lastMsg.loading = { ...lastMsg.loading, stage2: true };
+              messages[messages.length - 1] = lastMsg;
+              return { ...prev, messages };
+            });
+            break;
+          case 'stage2_complete':
+            setCurrentConversation((prev) => {
+              const messages = [...prev.messages];
+              const lastMsg = { ...messages[messages.length - 1] };
+              lastMsg.stage2 = event.data;
+              lastMsg.metadata = event.metadata;
+              lastMsg.loading = { ...lastMsg.loading, stage2: false };
+              messages[messages.length - 1] = lastMsg;
+              return { ...prev, messages };
+            });
+            break;
+          case 'stage3_start':
+            setCurrentConversation((prev) => {
+              const messages = [...prev.messages];
+              const lastMsg = { ...messages[messages.length - 1] };
+              lastMsg.loading = { ...lastMsg.loading, stage3: true };
+              messages[messages.length - 1] = lastMsg;
+              return { ...prev, messages };
+            });
+            break;
+          case 'stage3_complete':
+            setCurrentConversation((prev) => {
+              const messages = [...prev.messages];
+              const lastMsg = { ...messages[messages.length - 1] };
+              lastMsg.stage3 = event.data;
+              lastMsg.loading = { ...lastMsg.loading, stage3: false };
+              messages[messages.length - 1] = lastMsg;
+              return { ...prev, messages };
+            });
+            break;
+          case 'title_complete':
+            loadConversations();
+            break;
+          case 'complete':
+            loadConversations();
+            setIsLoading(false);
+            break;
+          case 'error':
+            console.error('Stream error:', event.message);
+            setIsLoading(false);
+            break;
+          default:
+            console.log('Unknown event type:', eventType);
+        }
+      });
+    } catch (error) {
+      console.error('Failed to send clarification:', error);
+      setIsLoading(false);
+    }
+  };
+
   return (
     <div className="app">
       <Sidebar
@@ -421,6 +572,7 @@ function App() {
         onSendMessage={handleSendMessage}
         onDraftChange={handleDraftChange}
         isLoading={isLoading}
+        onClarificationSubmit={handleClarificationSubmit}
       />
     </div>
   );

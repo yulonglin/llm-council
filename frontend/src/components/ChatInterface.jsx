@@ -1,5 +1,7 @@
 import { useState, useEffect, useRef } from 'react';
 import Markdown from './Markdown';
+import Stage0 from './Stage0';
+import ClarificationForm from './ClarificationForm';
 import Stage1 from './Stage1';
 import Stage2 from './Stage2';
 import Stage3 from './Stage3';
@@ -10,6 +12,7 @@ export default function ChatInterface({
   onSendMessage,
   onDraftChange,
   isLoading,
+  onClarificationSubmit,
 }) {
   const [input, setInput] = useState('');
   const messagesContainerRef = useRef(null);
@@ -63,10 +66,13 @@ export default function ChatInterface({
       let content = msg.content || '';
       
       if (msg.role === 'assistant') {
+        if (msg.rewrittenQuery) {
+          content = `**[Rewritten query: ${msg.rewrittenQuery}]**\n\n`;
+        }
         if (msg.stage3) {
-          content = typeof msg.stage3 === 'string' ? msg.stage3 : msg.stage3.response || JSON.stringify(msg.stage3);
+          content += typeof msg.stage3 === 'string' ? msg.stage3 : msg.stage3.response || JSON.stringify(msg.stage3);
         } else if (msg.stage1) {
-          content = '(Incomplete response)';
+          content += '(Incomplete response)';
         }
       }
       
@@ -161,6 +167,27 @@ export default function ChatInterface({
                       </button>
                     </div>
                   </div>
+
+                  {/* Stage 0 - Query refinement */}
+                  {msg.loading?.stage0 && (
+                    <div className="stage-loading">
+                      <div className="spinner"></div>
+                      <span>Analyzing query...</span>
+                    </div>
+                  )}
+                  {msg.rewrittenQuery && (
+                    <Stage0
+                      originalQuery={conversation.messages[index - 1]?.content}
+                      rewrittenQuery={msg.rewrittenQuery}
+                    />
+                  )}
+                  {msg.clarificationQuestions && !isLoading && (
+                    <ClarificationForm
+                      questions={msg.clarificationQuestions}
+                      onSubmit={onClarificationSubmit}
+                      onSkip={() => onClarificationSubmit(msg.clarificationQuestions.map(q => ({ question: q, answer: '' })))}
+                    />
+                  )}
 
                   {/* Stage 1 */}
                   {msg.loading?.stage1 && (

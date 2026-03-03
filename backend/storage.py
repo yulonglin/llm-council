@@ -13,9 +13,11 @@ from .config import DATA_DIR
 Path(DATA_DIR).mkdir(parents=True, exist_ok=True)
 
 # UUID pattern for conversation IDs (prevents path traversal)
-_UUID_PATTERN = re.compile(r'^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$', re.IGNORECASE)
+_UUID_PATTERN = re.compile(
+    r"^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$", re.IGNORECASE
+)
 
-T = TypeVar('T')
+T = TypeVar("T")
 
 
 def _validate_conversation_id(conversation_id: str) -> None:
@@ -37,7 +39,7 @@ def _get_lock(conversation_id: str) -> FileLock:
 
 def _write_json(path: str, data: Dict[str, Any]) -> None:
     """Write data to JSON file with consistent formatting."""
-    with open(path, 'w') as f:
+    with open(path, "w") as f:
         json.dump(data, f, indent=2)
 
 
@@ -45,11 +47,13 @@ def _read_json(path: str) -> Optional[Dict[str, Any]]:
     """Read JSON file if it exists, return None otherwise."""
     if not os.path.exists(path):
         return None
-    with open(path, 'r') as f:
+    with open(path, "r") as f:
         return json.load(f)
 
 
-def _ensure_defaults(conversation: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+def _ensure_defaults(
+    conversation: Optional[Dict[str, Any]],
+) -> Optional[Dict[str, Any]]:
     """Ensure optional fields exist for backward compatibility."""
     if conversation is None:
         return None
@@ -70,7 +74,7 @@ def create_conversation(conversation_id: str) -> Dict[str, Any]:
         "messages": [],
         "pinned": False,
         "archived": False,
-        "draft": ""
+        "draft": "",
     }
     with _get_lock(conversation_id):
         _write_json(_get_path(conversation_id), conversation)
@@ -98,7 +102,7 @@ def list_conversations(include_archived: bool = False) -> List[Dict[str, Any]]:
     """List all conversations (metadata only), sorted pinned first then newest."""
     conversations = []
     for filename in os.listdir(DATA_DIR):
-        if not filename.endswith('.json'):
+        if not filename.endswith(".json"):
             continue
         data = _ensure_defaults(_read_json(os.path.join(DATA_DIR, filename)))
         if data:
@@ -110,15 +114,17 @@ def list_conversations(include_archived: bool = False) -> List[Dict[str, Any]]:
                 continue
             if data.get("archived", False) and not include_archived:
                 continue
-            conversations.append({
-                "id": data["id"],
-                "created_at": data["created_at"],
-                "title": data.get("title", "New Conversation"),
-                "message_count": len(data["messages"]),
-                "pinned": data.get("pinned", False),
-                "archived": data.get("archived", False),
-                "has_draft": bool((data.get("draft") or "").strip())
-            })
+            conversations.append(
+                {
+                    "id": data["id"],
+                    "created_at": data["created_at"],
+                    "title": data.get("title", "New Conversation"),
+                    "message_count": len(data["messages"]),
+                    "pinned": data.get("pinned", False),
+                    "archived": data.get("archived", False),
+                    "has_draft": bool((data.get("draft") or "").strip()),
+                }
+            )
     conversations.sort(key=lambda x: x["created_at"], reverse=True)
     conversations.sort(key=lambda x: x.get("pinned", False), reverse=True)
     return conversations
@@ -143,9 +149,11 @@ def _load_and_save(conversation_id: str, modifier: Callable[[Dict[str, Any]], T]
 
 def add_user_message(conversation_id: str, content: str) -> None:
     """Add a user message to a conversation."""
+
     def modifier(conv):
         conv["messages"].append({"role": "user", "content": content})
         conv["draft"] = ""
+
     _load_and_save(conversation_id, modifier)
 
 
@@ -159,11 +167,13 @@ def add_user_message_atomic(conversation_id: str, content: str) -> bool:
     Returns:
         True if this was the first message in the conversation
     """
+
     def modifier(conv):
         is_first = len(conv["messages"]) == 0
         conv["messages"].append({"role": "user", "content": content})
         conv["draft"] = ""
         return is_first
+
     return _load_and_save(conversation_id, modifier)
 
 
@@ -171,50 +181,68 @@ def add_assistant_message(
     conversation_id: str,
     stage1: List[Dict[str, Any]],
     stage2: List[Dict[str, Any]],
-    stage3: Dict[str, Any]
+    stage3: Dict[str, Any],
 ) -> None:
     """Add an assistant message with all 3 stages to a conversation."""
+
     def modifier(conv):
-        conv["messages"].append({
-            "role": "assistant",
-            "stage1": stage1,
-            "stage2": stage2,
-            "stage3": stage3,
-            "status": "complete"
-        })
+        conv["messages"].append(
+            {
+                "role": "assistant",
+                "stage1": stage1,
+                "stage2": stage2,
+                "stage3": stage3,
+                "status": "complete",
+            }
+        )
+
     _load_and_save(conversation_id, modifier)
 
 
 def create_assistant_message(conversation_id: str) -> int:
     """Create an empty assistant message placeholder and return its index."""
+
     def modifier(conv):
-        conv["messages"].append({
-            "role": "assistant",
-            "status": "in_progress",
-            "stage1": None,
-            "stage2": None,
-            "stage3": None
-        })
+        conv["messages"].append(
+            {
+                "role": "assistant",
+                "status": "in_progress",
+                "stage0": None,
+                "rewritten_query": None,
+                "stage1": None,
+                "stage2": None,
+                "stage3": None,
+            }
+        )
         return len(conv["messages"]) - 1
+
     return _load_and_save(conversation_id, modifier)
 
 
-def update_assistant_message(conversation_id: str, message_index: int, **updates) -> None:
+def update_assistant_message(
+    conversation_id: str, message_index: int, **updates
+) -> None:
     """Update an existing assistant message with new stage data."""
+
     def modifier(conv):
         if message_index >= len(conv["messages"]):
             raise ValueError(f"Message index {message_index} out of range")
         message = conv["messages"][message_index]
         if message["role"] != "assistant":
-            raise ValueError(f"Message at index {message_index} is not an assistant message")
+            raise ValueError(
+                f"Message at index {message_index} is not an assistant message"
+            )
         message.update(updates)
+
     _load_and_save(conversation_id, modifier)
 
 
 def update_conversation_title(conversation_id: str, title: str) -> None:
     """Update the title of a conversation."""
+
     def modifier(conv):
         conv["title"] = title
+
     _load_and_save(conversation_id, modifier)
 
 
@@ -229,6 +257,7 @@ def update_conversation_fields(conversation_id: str, **updates) -> Dict[str, Any
     def modifier(conv):
         conv.update(fields)
         return conv
+
     return _load_and_save(conversation_id, modifier)
 
 

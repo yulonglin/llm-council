@@ -11,9 +11,7 @@ CACHE_ENABLED = os.getenv("LLM_CACHE", "1") != "0"
 
 
 async def query_model(
-    model: str,
-    messages: List[Dict[str, str]],
-    timeout: float = 120.0
+    model: str, messages: List[Dict[str, str]], timeout: float = 120.0
 ) -> Optional[Dict[str, Any]]:
     """
     Query a single model via OpenRouter API.
@@ -47,18 +45,16 @@ async def query_model(
         proxy = os.getenv("ALL_PROXY") or None
         async with httpx.AsyncClient(timeout=timeout, proxy=proxy) as client:
             response = await client.post(
-                OPENROUTER_API_URL,
-                headers=headers,
-                json=payload
+                OPENROUTER_API_URL, headers=headers, json=payload
             )
             response.raise_for_status()
 
             data = response.json()
-            message = data['choices'][0]['message']
+            message = data["choices"][0]["message"]
 
             result = {
-                'content': message.get('content'),
-                'reasoning_details': message.get('reasoning_details')
+                "content": message.get("content"),
+                "reasoning_details": message.get("reasoning_details"),
             }
 
             # Cache successful responses
@@ -73,8 +69,7 @@ async def query_model(
 
 
 async def query_models_parallel(
-    models: List[str],
-    messages: List[Dict[str, str]]
+    models: List[str], messages: List[Dict[str, str]]
 ) -> Dict[str, Optional[Dict[str, Any]]]:
     """
     Query multiple models in parallel.

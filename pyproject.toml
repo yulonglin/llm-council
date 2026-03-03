@@ -12,3 +12,9 @@ dependencies = [
     "pydantic>=2.9.0",
     "filelock>=3.0.0",
 ]
+
+[dependency-groups]
+dev = [
+    "ruff>=0.15.4",
+    "ty>=0.0.20",
+]

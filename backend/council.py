@@ -9,10 +9,101 @@ from .config import COUNCIL_MODELS, CHAIRMAN_MODEL
 
 # Default axes when chairman fails to produce custom ones
 DEFAULT_AXES = [
-    {"name": "Accuracy", "description": "Factual correctness and reliability of information"},
-    {"name": "Completeness", "description": "How thoroughly the response addresses the question"},
-    {"name": "Clarity", "description": "How well-organized and easy to understand the response is"},
+    {
+        "name": "Accuracy",
+        "description": "Factual correctness and reliability of information",
+    },
+    {
+        "name": "Completeness",
+        "description": "How thoroughly the response addresses the question",
+    },
+    {
+        "name": "Clarity",
+        "description": "How well-organized and easy to understand the response is",
+    },
 ]
+
+
+def parse_stage0_response(text: str) -> dict:
+    """Parse stage0 chairman response for clarification or rewritten query."""
+    result = {"needs_clarification": False, "questions": [], "rewritten_query": None}
+
+    if "CLARIFICATION_NEEDED:" in text:
+        idx = text.index("CLARIFICATION_NEEDED:")
+        section = text[idx + len("CLARIFICATION_NEEDED:") :]
+        questions = re.findall(r"\d+\.\s*(.+)", section)
+        if questions:
+            result["needs_clarification"] = True
+            result["questions"] = [q.strip() for q in questions]
+    elif "REWRITTEN_QUERY:" in text:
+        idx = text.index("REWRITTEN_QUERY:")
+        rewritten = text[idx + len("REWRITTEN_QUERY:") :].strip()
+        if rewritten:
+            result["rewritten_query"] = rewritten
+
+    return result
+
+
+async def stage0_analyze_query(user_query: str) -> dict:
+    """Stage 0: Chairman analyzes query for clarity, asks clarification or rewrites."""
+    prompt = f"""You are the Chairman of an LLM Council. Before the council answers a question, you analyze whether the query is clear enough to get high-quality responses.
+
+Query: {user_query}
+
+Your task: Determine if this query needs clarification or if you can rewrite it to be clearer and more specific.
+
+If the query is VAGUE or UNDERSPECIFIED (missing key context, could mean multiple different things, or needs scope clarification):
+- Ask 1-3 focused clarifying questions
+- Format your response EXACTLY as:
+CLARIFICATION_NEEDED:
+1. [First question]
+2. [Second question if needed]
+3. [Third question if needed]
+
+If the query is CLEAR ENOUGH to answer well (specific, has sufficient context, or is a simple factual/creative/technical question):
+- Rewrite it to be more precise, structured, and comprehensive
+- The rewrite should clarify scope, add relevant constraints, and decompose if needed
+- Format your response EXACTLY as:
+REWRITTEN_QUERY:
+[Your rewritten version of the query]
+
+Now analyze the query:"""
+
+    messages = [{"role": "user", "content": prompt}]
+    response = await query_model(CHAIRMAN_MODEL, messages, timeout=30.0)
+
+    if response is None:
+        return {"needs_clarification": False, "questions": [], "rewritten_query": None}
+
+    return parse_stage0_response(response.get("content", ""))
+
+
+async def stage0_rewrite_with_answers(
+    original_query: str, questions: list, answers: list
+) -> str:
+    """Rewrite query incorporating user's answers to clarifying questions."""
+    qa_pairs_text = "\n".join(
+        [f"Q: {item['question']}\nA: {item['answer']}" for item in answers]
+    )
+
+    prompt = f"""You are the Chairman of an LLM Council. A user asked a question and you asked for clarification. Now incorporate their answers to write a comprehensive, clear prompt for the council.
+
+Original query: {original_query}
+
+Clarifying questions and answers:
+{qa_pairs_text}
+
+Rewrite the query as a single, comprehensive prompt that incorporates all the clarification. The rewritten prompt should be clear, specific, and well-structured for the council to answer.
+
+Provide ONLY the rewritten query, with no preamble or explanation:"""
+
+    messages = [{"role": "user", "content": prompt}]
+    response = await query_model(CHAIRMAN_MODEL, messages, timeout=30.0)
+
+    if response is None:
+        return original_query
+
+    return response.get("content", original_query).strip() or original_query
 
 
 async def stage1_collect_responses(user_query: str) -> List[Dict[str, Any]]:
@@ -25,7 +116,13 @@ async def stage1_collect_responses(user_query: str) -> List[Dict[str, Any]]:
     Returns:
         List of dicts with 'model' and 'response' keys
     """
-    messages = [{"role": "user", "content": user_query}]
+    messages = [
+        {
+            "role": "system",
+            "content": "You are an expert participating in a council of AI models. Answer the following question thoroughly, accurately, and with clear structure. Draw on your full knowledge and reasoning ability.",
+        },
+        {"role": "user", "content": user_query},
+    ]
 
     # Query all models in parallel
     responses = await query_models_parallel(COUNCIL_MODELS, messages)
@@ -34,10 +131,9 @@ async def stage1_collect_responses(user_query: str) -> List[Dict[str, Any]]:
     stage1_results = []
     for model, response in responses.items():
         if response is not None:  # Only include successful responses
-            stage1_results.append({
-                "model": model,
-                "response": response.get('content', '')
-            })
+            stage1_results.append(
+                {"model": model, "response": response.get("content", "")}
+            )
 
     return stage1_results
 
@@ -52,25 +148,18 @@ async def stage2a_select_axes(user_query: str) -> List[Dict[str, str]]:
     Returns:
         List of dicts with 'name' and 'description' keys (3-5 axes)
     """
-    axes_prompt = f"""You are the Chairman of an LLM Council. Based on the following question, select 3-5 evaluation criteria (axes) that are most appropriate for judging response quality.
+    axes_prompt = f"""You are the Chairman of an LLM Council. Select 3-5 evaluation axes for judging response quality to this question.
 
 Question: {user_query}
 
-Consider what type of question this is (factual, creative, analytical, opinion-based, technical, etc.) and choose axes that best capture what makes a response good for this specific type.
+Consider the question type (factual, creative, analytical, technical, etc.) and choose axes that best capture what makes a response good for this specific type.
 
-IMPORTANT: Format your response EXACTLY as follows:
-- Start with the line "EVALUATION AXES:" (all caps, with colon)
-- Then list each axis as: "- Name: Description"
-- Each axis name should be 1-2 words
-- Each description should be one sentence
-
-Example:
+Format your response EXACTLY as:
 
 EVALUATION AXES:
-- Accuracy: Factual correctness and reliability of information provided
-- Depth: Level of detail and thoroughness in addressing the question
-- Clarity: How well-organized and easy to understand the response is
-- Practicality: Whether the response provides actionable and useful guidance
+- Name: One-sentence description
+- Name: One-sentence description
+(3-5 axes, each name 1-2 words)
 
 Now select the evaluation axes:"""
 
@@ -80,7 +169,7 @@ Now select the evaluation axes:"""
     if response is None:
         return DEFAULT_AXES
 
-    axes = parse_axes_from_text(response.get('content', ''))
+    axes = parse_axes_from_text(response.get("content", ""))
     if not axes:
         return DEFAULT_AXES
 
@@ -103,10 +192,10 @@ def parse_axes_from_text(text: str) -> List[Dict[str, str]]:
     if "EVALUATION AXES:" in text.upper():
         # Find the section (case-insensitive split)
         idx = text.upper().index("EVALUATION AXES:")
-        section = text[idx + len("EVALUATION AXES:"):]
+        section = text[idx + len("EVALUATION AXES:") :]
 
         # Extract "- Name: Description" lines
-        matches = re.findall(r'-\s*([^:\n]+):\s*(.+)', section)
+        matches = re.findall(r"-\s*([^:\n]+):\s*(.+)", section)
         for name, description in matches:
             name = name.strip()
             description = description.strip()
@@ -123,9 +212,7 @@ def parse_axes_from_text(text: str) -> List[Dict[str, str]]:
 
 
 async def stage2b_collect_scores(
-    user_query: str,
-    stage1_results: List[Dict[str, Any]],
-    axes: List[Dict[str, str]]
+    user_query: str, stage1_results: List[Dict[str, Any]], axes: List[Dict[str, str]]
 ) -> Tuple[List[Dict[str, Any]], Dict[str, str]]:
     """
     Stage 2b: Each model scores the anonymized responses on each axis (1-5).
@@ -147,23 +234,20 @@ async def stage2b_collect_scores(
 
     # Create mapping from label to model name
     label_to_model = {
-        f"Response {label}": result['model']
+        f"Response {label}": result["model"]
         for label, result in zip(labels, shuffled_results)
     }
 
     # Build axes description for the prompt
-    axes_text = "\n".join([
-        f"- {axis['name']}: {axis['description']}"
-        for axis in axes
-    ])
-
-    axes_names = ", ".join([axis['name'] for axis in axes])
+    axes_text = "\n".join([f"- {axis['name']}: {axis['description']}" for axis in axes])
 
     # Build the anonymized responses text
-    responses_text = "\n\n".join([
-        f"Response {label}:\n{result['response']}"
-        for label, result in zip(labels, shuffled_results)
-    ])
+    responses_text = "\n\n".join(
+        [
+            f"Response {label}:\n{result['response']}"
+            for label, result in zip(labels, shuffled_results)
+        ]
+    )
 
     scoring_prompt = f"""You are evaluating different responses to the following question:
 
@@ -182,10 +266,8 @@ Your task:
 1. First, evaluate each response individually. For each response, explain what it does well and what it does poorly on each axis.
 2. Then, at the very end of your response, provide scores.
 
-IMPORTANT: Your final scores MUST be formatted EXACTLY as follows:
-- Start with the line "SCORES:" (all caps, with colon)
-- Then for each response, write one line: "Response X: {axes_names}" with scores as integers
-- Format each axis as "AxisName=N" separated by commas
+IMPORTANT: Your final scores MUST be formatted EXACTLY as follows.
+Format each axis as "AxisName=N" (integer 1-5) separated by commas.
 
 Example of the correct format:
 
@@ -195,6 +277,8 @@ Response B is accurate but lacks depth on Z...
 SCORES:
 Response A: {", ".join([f"{axis['name']}=4" for axis in axes])}
 Response B: {", ".join([f"{axis['name']}=3" for axis in axes])}
+
+You MUST include the "SCORES:" line (all caps) followed by one line per response.
 
 Now provide your evaluation and scores:"""
 
@@ -207,20 +291,17 @@ Now provide your evaluation and scores:"""
     stage2_results = []
     for model, response in responses.items():
         if response is not None:
-            full_text = response.get('content', '')
+            full_text = response.get("content", "")
             parsed = parse_scores_from_text(full_text, axes)
-            stage2_results.append({
-                "model": model,
-                "evaluation": full_text,
-                "parsed_scores": parsed
-            })
+            stage2_results.append(
+                {"model": model, "evaluation": full_text, "parsed_scores": parsed}
+            )
 
     return stage2_results, label_to_model
 
 
 def parse_scores_from_text(
-    text: str,
-    axes: List[Dict[str, str]]
+    text: str, axes: List[Dict[str, str]]
 ) -> Dict[str, Dict[str, int]]:
     """
     Parse the SCORES section from a model's evaluation.
@@ -234,24 +315,23 @@ def parse_scores_from_text(
         {"Response A": {"Accuracy": 4, "Clarity": 5}, ...}
     """
     scores = {}
-    axis_names = [axis['name'].lower() for axis in axes]
-    axis_name_map = {axis['name'].lower(): axis['name'] for axis in axes}
+    axis_name_map = {axis["name"].lower(): axis["name"] for axis in axes}
 
     # Look for "SCORES:" section
     if "SCORES:" not in text.upper():
         return scores
 
     idx = text.upper().index("SCORES:")
-    section = text[idx + len("SCORES:"):]
+    section = text[idx + len("SCORES:") :]
 
     # Extract lines with "Response X: ..." pattern
-    for line in section.strip().split('\n'):
+    for line in section.strip().split("\n"):
         line = line.strip()
         if not line:
             continue
 
         # Match "Response X:" at start of line
-        resp_match = re.match(r'(Response [A-Z]):\s*(.*)', line)
+        resp_match = re.match(r"(Response [A-Z]):\s*(.*)", line)
         if not resp_match:
             continue
 
@@ -260,7 +340,7 @@ def parse_scores_from_text(
 
         # Extract AxisName=N pairs (case-insensitive)
         axis_scores = {}
-        pairs = re.findall(r'([A-Za-z\s]+?)\s*=\s*(\d+)', scores_part)
+        pairs = re.findall(r"([A-Za-z\s]+?)\s*=\s*(\d+)", scores_part)
         for axis_name_raw, score_str in pairs:
             axis_name_raw = axis_name_raw.strip()
             score = int(score_str)
@@ -281,7 +361,7 @@ def parse_scores_from_text(
 def calculate_aggregate_scores(
     stage2_results: List[Dict[str, Any]],
     label_to_model: Dict[str, str],
-    axes: List[Dict[str, str]]
+    axes: List[Dict[str, str]],
 ) -> List[Dict[str, Any]]:
     """
     Calculate aggregate scores per model per axis across all evaluators.
@@ -300,7 +380,7 @@ def calculate_aggregate_scores(
     model_evaluator_count = defaultdict(int)
 
     for result in stage2_results:
-        parsed = result.get('parsed_scores', {})
+        parsed = result.get("parsed_scores", {})
         counted_models = set()
         for label, axis_scores in parsed.items():
             if label not in label_to_model:
@@ -314,7 +394,7 @@ def calculate_aggregate_scores(
 
     # Compute averages
     aggregate = []
-    axis_names = [axis['name'] for axis in axes]
+    axis_names = [axis["name"] for axis in axes]
 
     for model, axis_data in model_axis_scores.items():
         avg_axis = {}
@@ -329,15 +409,17 @@ def calculate_aggregate_scores(
                 avg_axis[axis_name] = None
 
         overall = round(sum(all_scores) / len(all_scores), 2) if all_scores else 0
-        aggregate.append({
-            "model": model,
-            "axis_scores": avg_axis,
-            "overall_score": overall,
-            "evaluator_count": model_evaluator_count[model]
-        })
+        aggregate.append(
+            {
+                "model": model,
+                "axis_scores": avg_axis,
+                "overall_score": overall,
+                "evaluator_count": model_evaluator_count[model],
+            }
+        )
 
     # Sort by overall score descending (higher = better)
-    aggregate.sort(key=lambda x: x['overall_score'], reverse=True)
+    aggregate.sort(key=lambda x: x["overall_score"], reverse=True)
 
     return aggregate
 
@@ -347,7 +429,7 @@ async def stage3_synthesize_final(
     stage1_results: List[Dict[str, Any]],
     stage2_results: List[Dict[str, Any]],
     axes: List[Dict[str, str]],
-    aggregate_scores: List[Dict[str, Any]]
+    aggregate_scores: List[Dict[str, Any]],
 ) -> Dict[str, Any]:
     """
     Stage 3: Chairman synthesizes final response using scores.
@@ -363,22 +445,28 @@ async def stage3_synthesize_final(
         Dict with 'model' and 'response' keys
     """
     # Build comprehensive context for chairman
-    stage1_text = "\n\n".join([
-        f"Model: {result['model']}\nResponse: {result['response']}"
-        for result in stage1_results
-    ])
+    stage1_text = "\n\n".join(
+        [
+            f"Model: {result['model']}\nResponse: {result['response']}"
+            for result in stage1_results
+        ]
+    )
 
-    stage2_text = "\n\n".join([
-        f"Model: {result['model']}\nEvaluation: {result['evaluation']}"
-        for result in stage2_results
-    ])
+    stage2_text = "\n\n".join(
+        [
+            f"Model: {result['model']}\nEvaluation: {result['evaluation']}"
+            for result in stage2_results
+        ]
+    )
 
     # Build score summary
-    axes_names = [axis['name'] for axis in axes]
+    axes_names = [axis["name"] for axis in axes]
     score_summary_lines = []
     for agg in aggregate_scores:
-        model_short = agg['model'].split('/')[-1]
-        axis_parts = [f"{name}={agg['axis_scores'].get(name, 'N/A')}" for name in axes_names]
+        model_short = agg["model"].split("/")[-1]
+        axis_parts = [
+            f"{name}={agg['axis_scores'].get(name, 'N/A')}" for name in axes_names
+        ]
         score_summary_lines.append(
             f"  {model_short}: {', '.join(axis_parts)} (Overall: {agg['overall_score']})"
         )
@@ -388,16 +476,16 @@ async def stage3_synthesize_final(
 
 Original Question: {user_query}
 
-STAGE 1 - Individual Responses:
+## Individual Responses:
 {stage1_text}
 
-STAGE 2 - Peer Evaluations:
+## Peer Evaluations:
 {stage2_text}
 
-AGGREGATE SCORES (1-5 scale, higher is better):
+## Aggregate Scores (1-5 scale, higher is better):
 {score_summary}
 
-Evaluation Axes Used: {', '.join(axes_names)}
+Evaluation Axes Used: {", ".join(axes_names)}
 
 Your task as Chairman is to synthesize all of this information into a single, comprehensive, accurate answer to the user's original question. Consider:
 - The individual responses and their insights
@@ -414,16 +502,14 @@ Provide a clear, well-reasoned final answer that represents the council's collec
     if response is None:
         return {
             "model": CHAIRMAN_MODEL,
-            "response": "Error: Unable to generate final synthesis."
+            "response": "Error: Unable to generate final synthesis.",
         }
 
-    return {
-        "model": CHAIRMAN_MODEL,
-        "response": response.get('content', '')
-    }
+    return {"model": CHAIRMAN_MODEL, "response": response.get("content", "")}
 
 
 # --- Legacy functions kept for backward compatibility ---
+
 
 def parse_ranking_from_text(ranking_text: str) -> List[str]:
     """Parse the FINAL RANKING section from the model's response."""
@@ -431,24 +517,25 @@ def parse_ranking_from_text(ranking_text: str) -> List[str]:
         parts = ranking_text.split("FINAL RANKING:")
         if len(parts) >= 2:
             ranking_section = parts[1]
-            numbered_matches = re.findall(r'\d+\.\s*Response [A-Z]', ranking_section)
+            numbered_matches = re.findall(r"\d+\.\s*Response [A-Z]", ranking_section)
             if numbered_matches:
-                return [re.search(r'Response [A-Z]', m).group() for m in numbered_matches]
-            matches = re.findall(r'Response [A-Z]', ranking_section)
+                return [
+                    re.search(r"Response [A-Z]", m).group() for m in numbered_matches
+                ]
+            matches = re.findall(r"Response [A-Z]", ranking_section)
             return matches
-    matches = re.findall(r'Response [A-Z]', ranking_text)
+    matches = re.findall(r"Response [A-Z]", ranking_text)
     return matches
 
 
 def calculate_aggregate_rankings(
-    stage2_results: List[Dict[str, Any]],
-    label_to_model: Dict[str, str]
+    stage2_results: List[Dict[str, Any]], label_to_model: Dict[str, str]
 ) -> List[Dict[str, Any]]:
     """Calculate aggregate rankings across all models."""
     model_positions = defaultdict(list)
 
     for ranking in stage2_results:
-        ranking_text = ranking['ranking']
+        ranking_text = ranking["ranking"]
         parsed_ranking = parse_ranking_from_text(ranking_text)
         for position, label in enumerate(parsed_ranking, start=1):
             if label in label_to_model:
@@ -459,13 +546,15 @@ def calculate_aggregate_rankings(
     for model, positions in model_positions.items():
         if positions:
             avg_rank = sum(positions) / len(positions)
-            aggregate.append({
-                "model": model,
-                "average_rank": round(avg_rank, 2),
-                "rankings_count": len(positions)
-            })
+            aggregate.append(
+                {
+                    "model": model,
+                    "average_rank": round(avg_rank, 2),
+                    "rankings_count": len(positions),
+                }
+            )
 
-    aggregate.sort(key=lambda x: x['average_rank'])
+    aggregate.sort(key=lambda x: x["average_rank"])
     return aggregate
 
 
@@ -495,10 +584,10 @@ Title:"""
         # Fallback to a generic title
         return "New Conversation"
 
-    title = response.get('content', 'New Conversation').strip()
+    title = response.get("content", "New Conversation").strip()
 
     # Clean up the title - remove quotes, limit length
-    title = title.strip('"\'')
+    title = title.strip("\"'")
 
     # Truncate if too long
     if len(title) > 50:
@@ -522,34 +611,37 @@ async def run_full_council(user_query: str) -> Tuple[List, List, Dict, Dict]:
 
     # If no models responded successfully, return error
     if not stage1_results:
-        return [], [], {
-            "model": "error",
-            "response": "All models failed to respond. Please try again."
-        }, {}
+        return (
+            [],
+            [],
+            {
+                "model": "error",
+                "response": "All models failed to respond. Please try again.",
+            },
+            {},
+        )
 
     # Stage 2a: Chairman selects evaluation axes
     axes = await stage2a_select_axes(user_query)
 
     # Stage 2b: Collect scores
-    stage2_results, label_to_model = await stage2b_collect_scores(user_query, stage1_results, axes)
+    stage2_results, label_to_model = await stage2b_collect_scores(
+        user_query, stage1_results, axes
+    )
 
     # Calculate aggregate scores
     aggregate_scores = calculate_aggregate_scores(stage2_results, label_to_model, axes)
 
     # Stage 3: Synthesize final answer
     stage3_result = await stage3_synthesize_final(
-        user_query,
-        stage1_results,
-        stage2_results,
-        axes,
-        aggregate_scores
+        user_query, stage1_results, stage2_results, axes, aggregate_scores
     )
 
     # Prepare metadata
     metadata = {
         "label_to_model": label_to_model,
         "axes": axes,
-        "aggregate_scores": aggregate_scores
+        "aggregate_scores": aggregate_scores,
     }
 
     return stage1_results, stage2_results, stage3_result, metadata
