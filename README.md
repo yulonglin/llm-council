@@ -2,7 +2,7 @@
 
 ![llmcouncil](header.jpg)
 
-The idea of this repo is that instead of asking a question to your favorite LLM provider (e.g. OpenAI GPT 5.1, Google Gemini 3.0 Pro, Anthropic Claude Sonnet 4.5, xAI Grok 4, eg.c), you can group them into your "LLM Council". This repo is a simple, local web app that essentially looks like ChatGPT except it uses OpenRouter to send your query to multiple LLMs, it then asks them to review and rank each other's work, and finally a Chairman LLM produces the final response.
+The idea of this repo is that instead of asking a question to your favorite LLM provider (e.g. OpenAI GPT 5.2 Pro, Google Gemini 3.1 Pro Preview, Anthropic Claude Opus 4.6, xAI Grok 4), you can group them into your "LLM Council". This repo is a simple, local web app that essentially looks like ChatGPT except it uses OpenRouter to send your query to multiple LLMs, it then asks them to review and rank each other's work, and finally a Chairman LLM produces the final response.
 
 In a bit more detail, here is what happens when you submit a query:
 
@@ -48,14 +48,16 @@ Edit `backend/config.py` to customize the council:
 
 ```python
 COUNCIL_MODELS = [
-    "openai/gpt-5.1",
-    "google/gemini-3-pro-preview",
-    "anthropic/claude-sonnet-4.5",
+    "openai/gpt-5.2-pro",
+    "anthropic/claude-opus-4.6",
+    "google/gemini-3.1-pro-preview",
     "x-ai/grok-4",
 ]
 
-CHAIRMAN_MODEL = "google/gemini-3-pro-preview"
+CHAIRMAN_MODEL = "anthropic/claude-opus-4.6"
 ```
+
+Important: use the exact OpenRouter slug (for example `google/gemini-3.1-pro-preview`). The non-preview slug `google/gemini-3.1-pro` is currently invalid on OpenRouter.
 
 ## Running the Application
 
