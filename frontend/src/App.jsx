@@ -8,7 +8,9 @@ function App() {
   const [conversations, setConversations] = useState([]);
   const [currentConversationId, setCurrentConversationId] = useState(null);
   const [currentConversation, setCurrentConversation] = useState(null);
-  const [isLoading, setIsLoading] = useState(false);
+  const [loadingConversationIds, setLoadingConversationIds] = useState(new Set());
+  const activeStreamsRef = useRef(new Map()); // convId → AbortController
+  const isCurrentLoading = loadingConversationIds.has(currentConversationId);
   const [showArchived, setShowArchived] = useState(false);
   const [sidebarWidth, setSidebarWidth] = useState(260);
   const draftSaveRef = useRef({ timer: null, id: null, draft: '' });
@@ -243,6 +245,17 @@ function App() {
     if (!confirmed) {
       return;
     }
+    // Abort any active stream for this conversation
+    const controller = activeStreamsRef.current.get(id);
+    if (controller) {
+      controller.abort();
+      activeStreamsRef.current.delete(id);
+      setLoadingConversationIds(prev => {
+        const next = new Set(prev);
+        next.delete(id);
+        return next;
+      });
+    }
     try {
       await api.deleteConversation(id);
       setConversations((prev) => prev.filter((conv) => conv.id !== id));
@@ -259,18 +272,29 @@ function App() {
   const handleSendMessage = async (content) => {
     if (!currentConversationId) return;
 
-    setIsLoading(true);
+    const targetId = currentConversationId;
+
+    // Add to loading set
+    setLoadingConversationIds(prev => new Set(prev).add(targetId));
+
+    // Create AbortController for this stream
+    const abortController = new AbortController();
+    activeStreamsRef.current.set(targetId, abortController);
+
     try {
       // Optimistically add user message to UI
       const userMessage = { role: 'user', content };
-      setCurrentConversation((prev) => ({
-        ...prev,
-        messages: [...prev.messages, userMessage],
-        draft: '',
-      }));
+      setCurrentConversation((prev) => {
+        if (!prev || prev.id !== targetId) return prev;
+        return {
+          ...prev,
+          messages: [...prev.messages, userMessage],
+          draft: '',
+        };
+      });
       setConversations((prev) =>
         prev.map((conv) =>
-          conv.id === currentConversationId ? { ...conv, has_draft: false } : conv
+          conv.id === targetId ? { ...conv, has_draft: false } : conv
         )
       );
 
@@ -293,16 +317,34 @@ function App() {
       };
 
       // Add the partial assistant message
-      setCurrentConversation((prev) => ({
-        ...prev,
-        messages: [...prev.messages, assistantMessage],
-      }));
+      setCurrentConversation((prev) => {
+        if (!prev || prev.id !== targetId) return prev;
+        return {
+          ...prev,
+          messages: [...prev.messages, assistantMessage],
+        };
+      });
+
+      // Helper to update the last assistant message immutably, with guard
+      const updateLastMessage = (updater) => {
+        setCurrentConversation((prev) => {
+          if (!prev || prev.id !== targetId) return prev;
+          const messages = [...prev.messages];
+          const lastMsg = { ...messages[messages.length - 1] };
+          const loading = { ...(lastMsg.loading || { stage0: false, stage1: false, stage2: false, stage3: false }) };
+          updater(lastMsg, loading);
+          lastMsg.loading = loading;
+          messages[messages.length - 1] = lastMsg;
+          return { ...prev, messages };
+        });
+      };
 
       // Send message with streaming
-      await api.sendMessageStream(currentConversationId, content, (eventType, event) => {
+      await api.sendMessageStream(targetId, content, (eventType, event) => {
         switch (eventType) {
           case 'stage0_start':
             setCurrentConversation((prev) => {
+              if (!prev || prev.id !== targetId) return prev;
               const messages = [...prev.messages];
               const lastMsg = { ...messages[messages.length - 1] };
               lastMsg.loading = { ...lastMsg.loading, stage0: true };
@@ -313,6 +355,7 @@ function App() {
 
           case 'stage0_complete':
             setCurrentConversation((prev) => {
+              if (!prev || prev.id !== targetId) return prev;
               const messages = [...prev.messages];
               const lastMsg = { ...messages[messages.length - 1] };
               lastMsg.rewrittenQuery = event.data.rewritten_query;
@@ -324,6 +367,7 @@ function App() {
 
           case 'clarification_needed':
             setCurrentConversation((prev) => {
+              if (!prev || prev.id !== targetId) return prev;
               const messages = [...prev.messages];
               const lastMsg = { ...messages[messages.length - 1] };
               lastMsg.clarificationQuestions = event.data.questions;
@@ -331,113 +375,120 @@ function App() {
               messages[messages.length - 1] = lastMsg;
               return { ...prev, messages };
             });
-            setIsLoading(false);
+            setLoadingConversationIds(prev => {
+              const next = new Set(prev);
+              next.delete(targetId);
+              return next;
+            });
+            activeStreamsRef.current.delete(targetId);
             break;
 
           case 'stage1_start':
-            setCurrentConversation((prev) => {
-              const messages = [...prev.messages];
-              const lastMsg = messages[messages.length - 1];
-              lastMsg.loading.stage1 = true;
-              return { ...prev, messages };
+            updateLastMessage((msg, loading) => {
+              loading.stage1 = true;
             });
             break;
 
           case 'stage1_complete':
-            setCurrentConversation((prev) => {
-              const messages = [...prev.messages];
-              const lastMsg = messages[messages.length - 1];
-              lastMsg.stage1 = event.data;
-              lastMsg.loading.stage1 = false;
-              return { ...prev, messages };
+            updateLastMessage((msg, loading) => {
+              msg.stage1 = event.data;
+              loading.stage1 = false;
             });
             break;
 
           case 'axes_complete':
-            setCurrentConversation((prev) => {
-              const messages = [...prev.messages];
-              const lastMsg = messages[messages.length - 1];
-              lastMsg.axes = event.data;
-              return { ...prev, messages };
+            updateLastMessage((msg) => {
+              msg.axes = event.data;
             });
             break;
 
           case 'stage2_start':
-            setCurrentConversation((prev) => {
-              const messages = [...prev.messages];
-              const lastMsg = messages[messages.length - 1];
-              lastMsg.loading.stage2 = true;
-              return { ...prev, messages };
+            updateLastMessage((msg, loading) => {
+              loading.stage2 = true;
             });
             break;
 
           case 'stage2_complete':
-            setCurrentConversation((prev) => {
-              const messages = [...prev.messages];
-              const lastMsg = messages[messages.length - 1];
-              lastMsg.stage2 = event.data;
-              lastMsg.metadata = event.metadata;
-              lastMsg.loading.stage2 = false;
-              return { ...prev, messages };
+            updateLastMessage((msg, loading) => {
+              msg.stage2 = event.data;
+              msg.metadata = event.metadata;
+              loading.stage2 = false;
             });
             break;
 
           case 'stage3_start':
-            setCurrentConversation((prev) => {
-              const messages = [...prev.messages];
-              const lastMsg = messages[messages.length - 1];
-              lastMsg.loading.stage3 = true;
-              return { ...prev, messages };
+            updateLastMessage((msg, loading) => {
+              loading.stage3 = true;
             });
             break;
 
           case 'stage3_complete':
-            setCurrentConversation((prev) => {
-              const messages = [...prev.messages];
-              const lastMsg = messages[messages.length - 1];
-              lastMsg.stage3 = event.data;
-              lastMsg.loading.stage3 = false;
-              return { ...prev, messages };
+            updateLastMessage((msg, loading) => {
+              msg.stage3 = event.data;
+              loading.stage3 = false;
             });
             break;
 
           case 'title_complete':
-            // Reload conversations to get updated title
             loadConversations();
             break;
 
           case 'complete':
-            // Stream complete, reload conversations list
             loadConversations();
-            setIsLoading(false);
+            setLoadingConversationIds(prev => {
+              const next = new Set(prev);
+              next.delete(targetId);
+              return next;
+            });
+            activeStreamsRef.current.delete(targetId);
             break;
 
           case 'error':
             console.error('Stream error:', event.message);
-            setIsLoading(false);
+            setLoadingConversationIds(prev => {
+              const next = new Set(prev);
+              next.delete(targetId);
+              return next;
+            });
+            activeStreamsRef.current.delete(targetId);
             break;
 
           default:
             console.log('Unknown event type:', eventType);
         }
-      });
+      }, { signal: abortController.signal });
     } catch (error) {
+      if (error.name === 'AbortError') {
+        // Stream was intentionally aborted (e.g., conversation deleted)
+        return;
+      }
       console.error('Failed to send message:', error);
       // Remove optimistic messages on error
-      setCurrentConversation((prev) => ({
-        ...prev,
-        messages: prev.messages.slice(0, -2),
-      }));
-      setIsLoading(false);
+      setCurrentConversation((prev) => {
+        if (!prev || prev.id !== targetId) return prev;
+        return {
+          ...prev,
+          messages: prev.messages.slice(0, -2),
+        };
+      });
+      setLoadingConversationIds(prev => {
+        const next = new Set(prev);
+        next.delete(targetId);
+        return next;
+      });
+      activeStreamsRef.current.delete(targetId);
     }
   };
 
   const handleClarificationSubmit = async (answers) => {
     if (!currentConversationId) return;
-    setIsLoading(true);
+
+    const targetId = currentConversationId;
+    setLoadingConversationIds(prev => new Set(prev).add(targetId));
 
     // Clear clarification questions, show loading
     setCurrentConversation((prev) => {
+      if (!prev || prev.id !== targetId) return prev;
       const messages = [...prev.messages];
       const lastMsg = { ...messages[messages.length - 1] };
       lastMsg.clarificationQuestions = null;
@@ -446,11 +497,20 @@ function App() {
       return { ...prev, messages };
     });
 
+    const removeLoading = () => {
+      setLoadingConversationIds(prev => {
+        const next = new Set(prev);
+        next.delete(targetId);
+        return next;
+      });
+    };
+
     try {
       await api.sendClarificationStream(currentConversationId, answers, (eventType, event) => {
         switch (eventType) {
           case 'stage0_complete':
             setCurrentConversation((prev) => {
+              if (!prev || prev.id !== targetId) return prev;
               const messages = [...prev.messages];
               const lastMsg = { ...messages[messages.length - 1] };
               lastMsg.rewrittenQuery = event.data.rewritten_query;
@@ -460,6 +520,7 @@ function App() {
             break;
           case 'stage1_start':
             setCurrentConversation((prev) => {
+              if (!prev || prev.id !== targetId) return prev;
               const messages = [...prev.messages];
               const lastMsg = { ...messages[messages.length - 1] };
               lastMsg.loading = { ...lastMsg.loading, stage1: true };
@@ -469,6 +530,7 @@ function App() {
             break;
           case 'stage1_complete':
             setCurrentConversation((prev) => {
+              if (!prev || prev.id !== targetId) return prev;
               const messages = [...prev.messages];
               const lastMsg = { ...messages[messages.length - 1] };
               lastMsg.stage1 = event.data;
@@ -479,6 +541,7 @@ function App() {
             break;
           case 'axes_complete':
             setCurrentConversation((prev) => {
+              if (!prev || prev.id !== targetId) return prev;
               const messages = [...prev.messages];
               const lastMsg = { ...messages[messages.length - 1] };
               lastMsg.axes = event.data;
@@ -488,6 +551,7 @@ function App() {
             break;
           case 'stage2_start':
             setCurrentConversation((prev) => {
+              if (!prev || prev.id !== targetId) return prev;
               const messages = [...prev.messages];
               const lastMsg = { ...messages[messages.length - 1] };
               lastMsg.loading = { ...lastMsg.loading, stage2: true };
@@ -497,6 +561,7 @@ function App() {
             break;
           case 'stage2_complete':
             setCurrentConversation((prev) => {
+              if (!prev || prev.id !== targetId) return prev;
               const messages = [...prev.messages];
               const lastMsg = { ...messages[messages.length - 1] };
               lastMsg.stage2 = event.data;
@@ -508,6 +573,7 @@ function App() {
             break;
           case 'stage3_start':
             setCurrentConversation((prev) => {
+              if (!prev || prev.id !== targetId) return prev;
               const messages = [...prev.messages];
               const lastMsg = { ...messages[messages.length - 1] };
               lastMsg.loading = { ...lastMsg.loading, stage3: true };
@@ -517,6 +583,7 @@ function App() {
             break;
           case 'stage3_complete':
             setCurrentConversation((prev) => {
+              if (!prev || prev.id !== targetId) return prev;
               const messages = [...prev.messages];
               const lastMsg = { ...messages[messages.length - 1] };
               lastMsg.stage3 = event.data;
@@ -530,11 +597,11 @@ function App() {
             break;
           case 'complete':
             loadConversations();
-            setIsLoading(false);
+            removeLoading();
             break;
           case 'error':
             console.error('Stream error:', event.message);
-            setIsLoading(false);
+            removeLoading();
             break;
           default:
             console.log('Unknown event type:', eventType);
@@ -542,7 +609,7 @@ function App() {
       });
     } catch (error) {
       console.error('Failed to send clarification:', error);
-      setIsLoading(false);
+      removeLoading();
     }
   };
 
@@ -556,6 +623,7 @@ function App() {
         onTogglePin={handleTogglePin}
         onToggleArchive={handleToggleArchive}
         onDeleteConversation={handleDeleteConversation}
+        loadingConversationIds={loadingConversationIds}
         showArchived={showArchived}
         onToggleArchivedView={() => setShowArchived((prev) => !prev)}
         width={sidebarWidth}
@@ -571,7 +639,7 @@ function App() {
         conversation={currentConversation}
         onSendMessage={handleSendMessage}
         onDraftChange={handleDraftChange}
-        isLoading={isLoading}
+        isLoading={isCurrentLoading}
         onClarificationSubmit={handleClarificationSubmit}
       />
     </div>
