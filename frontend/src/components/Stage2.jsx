@@ -72,23 +72,28 @@ export default function Stage2({ rankings, labelToModel, aggregateRankings }) {
 
       {aggregateRankings && aggregateRankings.length > 0 && (
         <div className="aggregate-rankings">
-          <h4>Aggregate Rankings (Street Cred)</h4>
+          <h4>Aggregate Rankings (Weighted Scores)</h4>
           <p className="stage-description">
-            Combined results across all peer evaluations (lower score is better):
+            {aggregateRankings[0]?.score_available
+              ? "Combined weighted scores across all peer evaluations (higher is better, max 5.0):"
+              : "Rankings based on ordinal peer votes (converted to 0–5 scale):"}
           </p>
           <div className="aggregate-list">
             {aggregateRankings.map((agg, index) => (
               <div key={index} className="aggregate-item">
                 <span className="rank-position">#{index + 1}</span>
-                <span className="rank-model">
-                  {agg.model.split('/')[1] || agg.model}
-                </span>
-                <span className="rank-score">
-                  Avg: {agg.average_rank.toFixed(2)}
-                </span>
-                <span className="rank-count">
-                  ({agg.rankings_count} votes)
-                </span>
+                <span className="rank-model">{agg.model.split('/')[1] || agg.model}</span>
+                <span className="rank-score">{agg.weighted_score?.toFixed(2) ?? '—'}/5</span>
+                <span className="rank-count">({agg.rankings_count} evaluations)</span>
+                {agg.score_available && agg.criteria_scores && (
+                  <div className="criteria-breakdown">
+                    {Object.entries(agg.criteria_scores).map(([criterion, score]) => (
+                      <span key={criterion} className="criterion-chip">
+                        {criterion}: {score != null ? score.toFixed(1) : '—'}
+                      </span>
+                    ))}
+                  </div>
+                )}
               </div>
             ))}
           </div>

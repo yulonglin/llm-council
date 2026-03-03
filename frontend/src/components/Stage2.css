@@ -151,3 +151,28 @@
   color: #999;
   font-size: 12px;
 }
+
+.aggregate-item {
+  flex-wrap: wrap;
+}
+
+.criteria-breakdown {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  width: 100%;
+  margin-top: 6px;
+  padding-top: 6px;
+  border-top: 1px solid #e8f0fd;
+}
+
+.criterion-chip {
+  background: #eef4ff;
+  border: 1px solid #c5d9f5;
+  border-radius: 12px;
+  padding: 2px 10px;
+  font-size: 12px;
+  color: #3a6ec4;
+  font-family: monospace;
+  white-space: nowrap;
+}
