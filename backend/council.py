@@ -1,11 +1,12 @@
 """3-stage LLM Council orchestration."""
 
+import json
 import re
 import random
-from typing import List, Dict, Any, Tuple
+from typing import List, Dict, Any, Tuple, Optional
 from collections import defaultdict
 from .openrouter import query_models_parallel, query_model
-from .config import COUNCIL_MODELS, CHAIRMAN_MODEL
+from .config import COUNCIL_MODELS, CHAIRMAN_MODEL, EVALUATION_CRITERIA
 
 # Default axes when chairman fails to produce custom ones
 DEFAULT_AXES = [
@@ -519,42 +520,124 @@ def parse_ranking_from_text(ranking_text: str) -> List[str]:
             ranking_section = parts[1]
             numbered_matches = re.findall(r"\d+\.\s*Response [A-Z]", ranking_section)
             if numbered_matches:
-                return [
-                    re.search(r"Response [A-Z]", m).group() for m in numbered_matches
-                ]
+                return [match.group() for m in numbered_matches if (match := re.search(r'Response [A-Z]', m))]
             matches = re.findall(r"Response [A-Z]", ranking_section)
             return matches
     matches = re.findall(r"Response [A-Z]", ranking_text)
     return matches
 
 
+def parse_criteria_scores_from_text(
+    evaluation_text: str,
+    criteria_names: List[str]
+) -> Dict[str, Dict[str, Optional[float]]]:
+    """Extract per-criterion scores from the SCORES: JSON block.
+
+    Returns: {label -> {criterion_name -> score_or_None}}
+    Returns empty dict if SCORES block is absent or unparseable.
+    """
+    scores_idx = evaluation_text.find('SCORES:')
+    if scores_idx == -1:
+        return {}
+    brace_idx = evaluation_text.find('{', scores_idx)
+    if brace_idx == -1:
+        return {}
+    try:
+        raw, _ = json.JSONDecoder().raw_decode(evaluation_text, brace_idx)
+    except json.JSONDecodeError:
+        return {}
+
+    results: Dict[str, Dict[str, Optional[float]]] = {}
+    for label, criterion_map in raw.items():
+        if not isinstance(criterion_map, dict):
+            continue
+        scores: Dict[str, Optional[float]] = {}
+        for cname in criteria_names:
+            val = criterion_map.get(cname)
+            try:
+                score = float(val) if val is not None else None
+                scores[cname] = score if score is not None and 1.0 <= score <= 5.0 else None
+            except (TypeError, ValueError):
+                scores[cname] = None
+        results[label] = scores
+
+    return results
+
+
 def calculate_aggregate_rankings(
     stage2_results: List[Dict[str, Any]], label_to_model: Dict[str, str]
 ) -> List[Dict[str, Any]]:
-    """Calculate aggregate rankings across all models."""
-    model_positions = defaultdict(list)
+    """
+    Calculate aggregate rankings using weighted criteria scores.
+
+    Falls back to ordinal rank conversion if criteria scores are unavailable.
+    """
+    criteria_names: List[str] = [c['name'] for c in EVALUATION_CRITERIA]
+    weight_map: Dict[str, int] = {c['name']: c['weight'] for c in EVALUATION_CRITERIA}
+
+    model_criterion_scores: Dict[str, Dict[str, List[float]]] = defaultdict(lambda: defaultdict(list))
+    model_positions: Dict[str, List[int]] = defaultdict(list)
+    model_evaluator_count: Dict[str, int] = defaultdict(int)
 
     for ranking in stage2_results:
-        ranking_text = ranking["ranking"]
-        parsed_ranking = parse_ranking_from_text(ranking_text)
-        for position, label in enumerate(parsed_ranking, start=1):
+        text = ranking['ranking']
+        label_scores = parse_criteria_scores_from_text(text, criteria_names)
+        for label, cscores in label_scores.items():
+            if label not in label_to_model:
+                continue
+            model = label_to_model[label]
+            has_any_score = False
+            for cname, score in cscores.items():
+                if score is not None:
+                    model_criterion_scores[model][cname].append(score)
+                    has_any_score = True
+            if has_any_score:
+                model_evaluator_count[model] += 1
+
+        for pos, label in enumerate(parse_ranking_from_text(text), start=1):
             if label in label_to_model:
-                model_name = label_to_model[label]
-                model_positions[model_name].append(position)
+                model_positions[label_to_model[label]].append(pos)
 
+    all_models = set(label_to_model.values())
     aggregate = []
-    for model, positions in model_positions.items():
-        if positions:
-            avg_rank = sum(positions) / len(positions)
-            aggregate.append(
-                {
-                    "model": model,
-                    "average_rank": round(avg_rank, 2),
-                    "rankings_count": len(positions),
-                }
-            )
 
-    aggregate.sort(key=lambda x: x["average_rank"])
+    for model in all_models:
+        avg_criteria: Dict[str, Optional[float]] = {}
+        for cname in criteria_names:
+            scores = model_criterion_scores[model][cname]
+            avg_criteria[cname] = round(sum(scores) / len(scores), 2) if scores else None
+
+        scored = [(c, s) for c, s in avg_criteria.items() if s is not None]
+        score_available = bool(scored)
+
+        if score_available:
+            weighted_score = round(
+                sum(s * weight_map[c] for c, s in scored) / sum(weight_map[c] for c, _ in scored),
+                2
+            )
+            rankings_count = model_evaluator_count[model]
+        else:
+            positions = model_positions[model]
+            n = len(all_models)
+            if positions:
+                avg_rank = sum(positions) / len(positions)
+                raw = 5.0 - (avg_rank - 1) * (4.0 / max(n - 1, 1))
+                weighted_score = round(max(1.0, min(5.0, raw)), 2)
+                rankings_count = len(positions)
+            else:
+                weighted_score, rankings_count = 0.0, 0
+
+        positions = model_positions[model]
+        aggregate.append({
+            "model": model,
+            "weighted_score": weighted_score,
+            "criteria_scores": {c: avg_criteria.get(c) for c in criteria_names},
+            "rankings_count": rankings_count,
+            "average_rank": round(sum(positions) / len(positions), 2) if positions else None,
+            "score_available": score_available,
+        })
+
+    aggregate.sort(key=lambda x: x['weighted_score'], reverse=True)
     return aggregate
 
 
