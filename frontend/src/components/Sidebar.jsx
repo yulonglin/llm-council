@@ -9,6 +9,7 @@ export default function Sidebar({
   onTogglePin,
   onToggleArchive,
   onDeleteConversation,
+  loadingConversationIds,
   showArchived,
   onToggleArchivedView,
   width,
@@ -36,6 +37,7 @@ export default function Sidebar({
       onClick={() => onSelectConversation(conv.id)}
     >
       <div className="conversation-row">
+        {loadingConversationIds.has(conv.id) && <span className="streaming-dot" />}
         <div className="conversation-info">
           <div className="conversation-title">
             {conv.title || 'New Conversation'}
