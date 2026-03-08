@@ -63,7 +63,7 @@ CLARIFICATION_NEEDED:
 
 If the query is CLEAR ENOUGH to answer well (specific, has sufficient context, or is a simple factual/creative/technical question):
 - Rewrite it to be more precise, structured, and comprehensive
-- The rewrite should clarify scope, add relevant constraints, and decompose if needed
+- CRITICAL: You MUST preserve ALL information, details, and nuances from the original query. Do NOT truncate, summarize, or drop any part of the user's input. You may lightly reformat for clarity (e.g., add structure, clarify scope, decompose into sub-questions) but every piece of information in the original must appear in your rewrite.
 - Format your response EXACTLY as:
 REWRITTEN_QUERY:
 [Your rewritten version of the query]

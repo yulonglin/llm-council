@@ -116,7 +116,7 @@ export const api = {
    * @param {function} onEvent - Callback function for each event: (eventType, data) => void
    * @returns {Promise<void>}
    */
-  async sendMessageStream(conversationId, content, onEvent, { signal } = {}) {
+  async sendMessageStream(conversationId, content, onEvent, { signal, skipRewrite = false } = {}) {
     const response = await fetch(
       `${API_BASE}/api/conversations/${conversationId}/message/stream`,
       {
@@ -124,7 +124,7 @@ export const api = {
         headers: {
           'Content-Type': 'application/json',
         },
-        body: JSON.stringify({ content }),
+        body: JSON.stringify({ content, skip_rewrite: skipRewrite }),
         signal,
       }
     );

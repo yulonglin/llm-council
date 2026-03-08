@@ -97,6 +97,7 @@ class SendMessageRequest(BaseModel):
     """Request to send a message in a conversation."""
 
     content: str
+    skip_rewrite: bool = False
 
 
 class UpdateConversationRequest(BaseModel):
@@ -314,26 +315,30 @@ async def send_message_stream(conversation_id: str, request: SendMessageRequest)
                     generate_conversation_title(request.content)
                 )
 
-            # Stage 0: Query analysis
-            yield f"data: {json.dumps({'type': 'stage0_start'})}\n\n"
-            stage0_result = await stage0_analyze_query(request.content)
-            storage.update_assistant_message(
-                conversation_id, msg_index, stage0=stage0_result
-            )
-
-            if stage0_result["needs_clarification"]:
+            # Stage 0: Query analysis (skip if user disabled rewriting)
+            if request.skip_rewrite:
+                rewritten_query = request.content
+                yield f"data: {json.dumps({'type': 'stage0_complete', 'data': {'rewritten_query': None, 'skipped': True}})}\n\n"
+            else:
+                yield f"data: {json.dumps({'type': 'stage0_start'})}\n\n"
+                stage0_result = await stage0_analyze_query(request.content)
                 storage.update_assistant_message(
-                    conversation_id, msg_index, status="awaiting_clarification"
+                    conversation_id, msg_index, stage0=stage0_result
                 )
-                yield f"data: {json.dumps({'type': 'clarification_needed', 'data': {'questions': stage0_result['questions']}})}\n\n"
-                yield f"data: {json.dumps({'type': 'complete'})}\n\n"
-                return
 
-            rewritten_query = stage0_result.get("rewritten_query") or request.content
-            storage.update_assistant_message(
-                conversation_id, msg_index, rewritten_query=rewritten_query
-            )
-            yield f"data: {json.dumps({'type': 'stage0_complete', 'data': {'rewritten_query': rewritten_query}})}\n\n"
+                if stage0_result["needs_clarification"]:
+                    storage.update_assistant_message(
+                        conversation_id, msg_index, status="awaiting_clarification"
+                    )
+                    yield f"data: {json.dumps({'type': 'clarification_needed', 'data': {'questions': stage0_result['questions']}})}\n\n"
+                    yield f"data: {json.dumps({'type': 'complete'})}\n\n"
+                    return
+
+                rewritten_query = stage0_result.get("rewritten_query") or request.content
+                storage.update_assistant_message(
+                    conversation_id, msg_index, rewritten_query=rewritten_query
+                )
+                yield f"data: {json.dumps({'type': 'stage0_complete', 'data': {'rewritten_query': rewritten_query}})}\n\n"
 
             # Stages 1-3
             async for event in _run_stages_1_through_3(

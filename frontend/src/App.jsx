@@ -12,6 +12,7 @@ function App() {
   const activeStreamsRef = useRef(new Map()); // convId → AbortController
   const isCurrentLoading = loadingConversationIds.has(currentConversationId);
   const [showArchived, setShowArchived] = useState(false);
+  const [queryRewriteEnabled, setQueryRewriteEnabled] = useState(true);
   const [sidebarWidth, setSidebarWidth] = useState(260);
   const draftSaveRef = useRef({ timer: null, id: null, draft: '' });
   const isResizingRef = useRef(false);
@@ -456,7 +457,7 @@ function App() {
           default:
             console.log('Unknown event type:', eventType);
         }
-      }, { signal: abortController.signal });
+      }, { signal: abortController.signal, skipRewrite: !queryRewriteEnabled });
     } catch (error) {
       if (error.name === 'AbortError') {
         // Stream was intentionally aborted (e.g., conversation deleted)
@@ -477,6 +478,32 @@ function App() {
         return next;
       });
       activeStreamsRef.current.delete(targetId);
+    }
+  };
+
+  const handleCancelStream = () => {
+    if (!currentConversationId) return;
+    const controller = activeStreamsRef.current.get(currentConversationId);
+    if (controller) {
+      controller.abort();
+      activeStreamsRef.current.delete(currentConversationId);
+      setLoadingConversationIds(prev => {
+        const next = new Set(prev);
+        next.delete(currentConversationId);
+        return next;
+      });
+      // Mark last assistant message as cancelled
+      setCurrentConversation((prev) => {
+        if (!prev) return prev;
+        const messages = [...prev.messages];
+        const lastMsg = { ...messages[messages.length - 1] };
+        if (lastMsg.role === 'assistant') {
+          lastMsg.loading = { stage0: false, stage1: false, stage2: false, stage3: false };
+          lastMsg.cancelled = true;
+          messages[messages.length - 1] = lastMsg;
+        }
+        return { ...prev, messages };
+      });
     }
   };
 
@@ -641,6 +668,9 @@ function App() {
         onDraftChange={handleDraftChange}
         isLoading={isCurrentLoading}
         onClarificationSubmit={handleClarificationSubmit}
+        onCancel={handleCancelStream}
+        queryRewriteEnabled={queryRewriteEnabled}
+        onToggleQueryRewrite={() => setQueryRewriteEnabled(prev => !prev)}
       />
     </div>
   );

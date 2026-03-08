@@ -13,6 +13,9 @@ export default function ChatInterface({
   onDraftChange,
   isLoading,
   onClarificationSubmit,
+  onCancel,
+  queryRewriteEnabled,
+  onToggleQueryRewrite,
 }) {
   const [input, setInput] = useState('');
   const messagesContainerRef = useRef(null);
@@ -222,6 +225,12 @@ export default function ChatInterface({
                     </div>
                   )}
                   {msg.stage3 && <Stage3 finalResponse={msg.stage3} />}
+
+                  {msg.cancelled && (
+                    <div className="cancelled-indicator">
+                      Council run was cancelled.
+                    </div>
+                  )}
                 </div>
               )}
             </div>
@@ -232,6 +241,9 @@ export default function ChatInterface({
           <div className="loading-indicator">
             <div className="spinner"></div>
             <span>Consulting the council...</span>
+            <button className="cancel-button" onClick={onCancel}>
+              Cancel
+            </button>
           </div>
         )}
 
@@ -251,13 +263,23 @@ export default function ChatInterface({
             disabled={isLoading}
             rows={3}
           />
-          <button
-            type="submit"
-            className="send-button"
-            disabled={!input.trim() || isLoading}
-          >
-            Send
-          </button>
+          <div className="input-actions">
+            <label className="rewrite-toggle" title="When enabled, the chairman rewrites your query for clarity before the council answers">
+              <input
+                type="checkbox"
+                checked={queryRewriteEnabled}
+                onChange={onToggleQueryRewrite}
+              />
+              <span className="rewrite-toggle-label">Rewrite query</span>
+            </label>
+            <button
+              type="submit"
+              className="send-button"
+              disabled={!input.trim() || isLoading}
+            >
+              Send
+            </button>
+          </div>
         </form>
       )}
     </div>
