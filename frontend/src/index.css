@@ -85,6 +85,8 @@ body {
   border-radius: 3px;
   font-family: monospace;
   font-size: 0.9em;
+  overflow-wrap: anywhere;
+  word-break: break-word;
 }
 
 .markdown-content pre code {

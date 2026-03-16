@@ -113,6 +113,7 @@
 .message-group {
   margin-bottom: 32px;
   position: relative;
+  min-width: 0;
 }
 
 /* Hover state to show actions for message group? Or per message? */
@@ -177,6 +178,8 @@
   line-height: 1.6;
   max-width: 80%;
   white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  word-break: break-word;
 }
 
 .loading-indicator {
