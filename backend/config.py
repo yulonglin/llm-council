@@ -18,7 +18,7 @@ OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY")
 
 # Council members - list of OpenRouter model identifiers
 COUNCIL_MODELS = [
-    "openai/gpt-5.2-pro",
+    "openai/gpt-5.4-pro",
     "anthropic/claude-opus-4.6",
     "google/gemini-3.1-pro-preview",
 ]
