@@ -76,6 +76,8 @@ body {
   padding: 12px;
   border-radius: 4px;
   overflow-x: auto;
+  white-space: pre-wrap;
+  word-break: break-word;
   margin: 0 0 12px 0;
 }
 
