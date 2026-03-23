@@ -27,6 +27,12 @@ function App() {
     return sorted;
   };
 
+  // Update browser tab title based on current conversation
+  useEffect(() => {
+    const conv = conversations.find((c) => c.id === currentConversationId);
+    document.title = conv?.title ? `LLM Council: ${conv.title}` : 'LLM Council';
+  }, [currentConversationId, conversations]);
+
   // Load conversations on mount
   useEffect(() => {
     loadConversations({ includeArchived: showArchived });
