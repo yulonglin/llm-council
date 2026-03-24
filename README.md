@@ -2,7 +2,7 @@
 
 ![llmcouncil](header.jpg)
 
-The idea of this repo is that instead of asking a question to your favorite LLM provider (e.g. OpenAI GPT 5.2 Pro, Google Gemini 3.1 Pro Preview, Anthropic Claude Opus 4.6, xAI Grok 4), you can group them into your "LLM Council". This repo is a simple, local web app that essentially looks like ChatGPT except it uses OpenRouter to send your query to multiple LLMs, it then asks them to review and rank each other's work, and finally a Chairman LLM produces the final response.
+The idea of this repo is that instead of asking a question to your favorite LLM provider (e.g. OpenAI GPT 5.4 Pro, Google Gemini 3.1 Pro Preview, Anthropic Claude Opus 4.6, xAI Grok 4), you can group them into your "LLM Council". This repo is a simple, local web app that essentially looks like ChatGPT except it uses OpenRouter to send your query to multiple LLMs, it then asks them to review and rank each other's work, and finally a Chairman LLM produces the final response.
 
 In a bit more detail, here is what happens when you submit a query:
 
@@ -48,7 +48,7 @@ Edit `backend/config.py` to customize the council:
 
 ```python
 COUNCIL_MODELS = [
-    "openai/gpt-5.2-pro",
+    "openai/gpt-5.4-pro",
     "anthropic/claude-opus-4.6",
     "google/gemini-3.1-pro-preview",
     "x-ai/grok-4",
