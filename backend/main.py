@@ -238,6 +238,9 @@ async def _run_council_background(
     This runs independently of any SSE subscriber connections. If all clients
     disconnect, the task continues to completion and results are persisted to storage.
     """
+    # Capture our task_state reference so complete_task won't corrupt
+    # a newly registered task if this one gets cancelled and replaced.
+    my_task_state = tasks.get_task(conversation_id)
     try:
         # Stage 1: Collect responses
         tasks.broadcast(conversation_id, {"type": "stage1_start"})
@@ -312,7 +315,7 @@ async def _run_council_background(
             )
 
         tasks.broadcast(conversation_id, {"type": "complete"})
-        tasks.complete_task(conversation_id)
+        tasks.complete_task(conversation_id, task_state=my_task_state)
 
     except asyncio.CancelledError:
         try:
@@ -321,7 +324,7 @@ async def _run_council_background(
             )
         except Exception:
             pass
-        tasks.complete_task(conversation_id, "cancelled")
+        tasks.complete_task(conversation_id, "cancelled", task_state=my_task_state)
     except Exception as e:
         try:
             storage.update_assistant_message(
@@ -330,7 +333,7 @@ async def _run_council_background(
         except Exception:
             pass
         tasks.broadcast(conversation_id, {"type": "error", "message": str(e)})
-        tasks.complete_task(conversation_id, "error")
+        tasks.complete_task(conversation_id, "error", task_state=my_task_state)
     finally:
         if title_task and not title_task.done():
             title_task.cancel()

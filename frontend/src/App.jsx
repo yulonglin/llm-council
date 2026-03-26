@@ -181,7 +181,14 @@ function App() {
         activeStreamsRef.current.delete(targetId);
         break;
       case 'no_active_task':
-        // Task finished before we subscribed — just load from storage
+        // Task finished before we subscribed — reload from storage
+        loadConversation(targetId);
+        setLoadingConversationIds(prev => {
+          const next = new Set(prev);
+          next.delete(targetId);
+          return next;
+        });
+        activeStreamsRef.current.delete(targetId);
         break;
       default:
         console.log('Unknown event type:', eventType);

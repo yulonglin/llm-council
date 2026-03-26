@@ -43,22 +43,31 @@ def is_running(conversation_id: str) -> bool:
 
 
 def broadcast(conversation_id: str, event: dict) -> None:
-    """Store event and push to all subscribers."""
+    """Store event and push to all subscribers. Tags each event with _seq for dedup."""
     task_state = _tasks.get(conversation_id)
     if not task_state:
         return
+    event["_seq"] = len(task_state.events)
     task_state.events.append(event)
     for q in task_state.subscribers:
         q.put_nowait(event)
 
 
-def complete_task(conversation_id: str, status: str = "complete") -> None:
-    """Mark task as finished, notify subscribers, schedule cleanup."""
-    task_state = _tasks.get(conversation_id)
-    if not task_state:
+def complete_task(
+    conversation_id: str, status: str = "complete", task_state: "CouncilTask | None" = None
+) -> None:
+    """Mark task as finished, notify subscribers, schedule cleanup.
+
+    If task_state is provided, only completes if it's still the current task
+    (prevents cancelled tasks from corrupting newly registered ones).
+    """
+    current = _tasks.get(conversation_id)
+    if not current:
         return
-    task_state.status = status
-    for q in task_state.subscribers:
+    if task_state is not None and current is not task_state:
+        return  # A new task has been registered; don't touch it
+    current.status = status
+    for q in current.subscribers:
         q.put_nowait(None)
     # Auto-cleanup after 15 minutes (enough for suspended browser tabs)
     asyncio.get_running_loop().call_later(
@@ -129,22 +138,13 @@ async def subscribe(conversation_id: str):
         if task_state.status != "running" and queue.empty():
             return
 
-        # Drain live events (dedup against replayed ones by index)
-        events_yielded = replay_count
+        # Drain live events, skip any already replayed (using _seq tag)
         while True:
             event = await queue.get()
             if event is None:  # Sentinel: task finished
                 break
-            # Events broadcast during replay are already in the queue
-            # but were also yielded in the replay loop. Use the global
-            # events list position to detect duplicates.
-            try:
-                idx = task_state.events.index(event)
-            except ValueError:
-                idx = events_yielded
-            if idx < replay_count:
+            if event.get("_seq", replay_count) < replay_count:
                 continue  # Already replayed
-            events_yielded += 1
             yield event
     finally:
         if queue in task_state.subscribers:
