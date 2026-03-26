@@ -91,10 +91,141 @@ function App() {
     }
   };
 
+  // Unified SSE event handler for council stages (used by send, clarify, and reconnect)
+  const handleCouncilEvent = (targetId, eventType, event) => {
+    const updateLastMessage = (updater) => {
+      setCurrentConversation((prev) => {
+        if (!prev || prev.id !== targetId) return prev;
+        const messages = [...prev.messages];
+        const lastMsg = { ...messages[messages.length - 1] };
+        const loading = { ...(lastMsg.loading || { stage0: false, stage1: false, stage2: false, stage3: false }) };
+        updater(lastMsg, loading);
+        lastMsg.loading = loading;
+        messages[messages.length - 1] = lastMsg;
+        return { ...prev, messages };
+      });
+    };
+
+    switch (eventType) {
+      case 'stage0_start':
+        updateLastMessage((msg, loading) => { loading.stage0 = true; });
+        break;
+      case 'stage0_complete':
+        updateLastMessage((msg, loading) => {
+          msg.rewrittenQuery = event.data.rewritten_query;
+          loading.stage0 = false;
+        });
+        break;
+      case 'clarification_needed':
+        updateLastMessage((msg, loading) => {
+          msg.clarificationQuestions = event.data.questions;
+          loading.stage0 = false;
+        });
+        setLoadingConversationIds(prev => {
+          const next = new Set(prev);
+          next.delete(targetId);
+          return next;
+        });
+        activeStreamsRef.current.delete(targetId);
+        break;
+      case 'stage1_start':
+        updateLastMessage((msg, loading) => { loading.stage1 = true; });
+        break;
+      case 'stage1_complete':
+        updateLastMessage((msg, loading) => {
+          msg.stage1 = event.data;
+          loading.stage1 = false;
+        });
+        break;
+      case 'axes_complete':
+        updateLastMessage((msg) => { msg.axes = event.data; });
+        break;
+      case 'stage2_start':
+        updateLastMessage((msg, loading) => { loading.stage2 = true; });
+        break;
+      case 'stage2_complete':
+        updateLastMessage((msg, loading) => {
+          msg.stage2 = event.data;
+          msg.metadata = event.metadata;
+          loading.stage2 = false;
+        });
+        break;
+      case 'stage3_start':
+        updateLastMessage((msg, loading) => { loading.stage3 = true; });
+        break;
+      case 'stage3_complete':
+        updateLastMessage((msg, loading) => {
+          msg.stage3 = event.data;
+          loading.stage3 = false;
+        });
+        break;
+      case 'title_complete':
+        loadConversations();
+        break;
+      case 'complete':
+        loadConversations();
+        setLoadingConversationIds(prev => {
+          const next = new Set(prev);
+          next.delete(targetId);
+          return next;
+        });
+        activeStreamsRef.current.delete(targetId);
+        break;
+      case 'error':
+        console.error('Stream error:', event.message);
+        setLoadingConversationIds(prev => {
+          const next = new Set(prev);
+          next.delete(targetId);
+          return next;
+        });
+        activeStreamsRef.current.delete(targetId);
+        break;
+      case 'no_active_task':
+        // Task finished before we subscribed — just load from storage
+        break;
+      default:
+        console.log('Unknown event type:', eventType);
+    }
+  };
+
   const loadConversation = async (id) => {
     try {
       const conv = await api.getConversation(id);
       setCurrentConversation(conv);
+
+      // Check if there's a running council task to reconnect to
+      const lastMsg = conv.messages?.[conv.messages.length - 1];
+      if (lastMsg?.role === 'assistant' && lastMsg.status !== 'complete' && lastMsg.status !== 'error' && lastMsg.status !== 'cancelled') {
+        // Already have a local stream for this conversation? Skip.
+        if (activeStreamsRef.current.has(id)) return;
+
+        const { running } = await api.getTaskStatus(id);
+        if (running) {
+          // Reconnect to the running task
+          setLoadingConversationIds(prev => new Set(prev).add(id));
+          const abortController = new AbortController();
+          activeStreamsRef.current.set(id, abortController);
+
+          api.subscribeToTask(id, (eventType, event) => {
+            handleCouncilEvent(id, eventType, event);
+          }, { signal: abortController.signal }).catch(err => {
+            if (err.name !== 'AbortError') {
+              console.error('Subscribe error:', err);
+            }
+          });
+        } else {
+          // Stale in-progress: server restarted. Show partial results.
+          setCurrentConversation(prev => {
+            if (!prev || prev.id !== id) return prev;
+            const messages = [...prev.messages];
+            const last = { ...messages[messages.length - 1] };
+            last.stale = true;
+            last.loading = { stage0: false, stage1: false, stage2: false, stage3: false };
+            messages[messages.length - 1] = last;
+            return { ...prev, messages };
+          });
+        }
+      }
     } catch (error) {
       console.error('Failed to load conversation:', error);
       setCurrentConversationId(null);
@@ -326,137 +457,9 @@ function App() {
         };
       });
 
-      // Helper to update the last assistant message immutably, with guard
-      const updateLastMessage = (updater) => {
-        setCurrentConversation((prev) => {
-          if (!prev || prev.id !== targetId) return prev;
-          const messages = [...prev.messages];
-          const lastMsg = { ...messages[messages.length - 1] };
-          const loading = { ...(lastMsg.loading || { stage0: false, stage1: false, stage2: false, stage3: false }) };
-          updater(lastMsg, loading);
-          lastMsg.loading = loading;
-          messages[messages.length - 1] = lastMsg;
-          return { ...prev, messages };
-        });
-      };
-
-      // Send message with streaming
+      // Send message with streaming — uses unified event handler
       await api.sendMessageStream(targetId, content, (eventType, event) => {
-        switch (eventType) {
-          case 'stage0_start':
-            setCurrentConversation((prev) => {
-              if (!prev || prev.id !== targetId) return prev;
-              const messages = [...prev.messages];
-              const lastMsg = { ...messages[messages.length - 1] };
-              lastMsg.loading = { ...lastMsg.loading, stage0: true };
-              messages[messages.length - 1] = lastMsg;
-              return { ...prev, messages };
-            });
-            break;
-
-          case 'stage0_complete':
-            setCurrentConversation((prev) => {
-              if (!prev || prev.id !== targetId) return prev;
-              const messages = [...prev.messages];
-              const lastMsg = { ...messages[messages.length - 1] };
-              lastMsg.rewrittenQuery = event.data.rewritten_query;
-              lastMsg.loading = { ...lastMsg.loading, stage0: false };
-              messages[messages.length - 1] = lastMsg;
-              return { ...prev, messages };
-            });
-            break;
-
-          case 'clarification_needed':
-            setCurrentConversation((prev) => {
-              if (!prev || prev.id !== targetId) return prev;
-              const messages = [...prev.messages];
-              const lastMsg = { ...messages[messages.length - 1] };
-              lastMsg.clarificationQuestions = event.data.questions;
-              lastMsg.loading = { ...lastMsg.loading, stage0: false };
-              messages[messages.length - 1] = lastMsg;
-              return { ...prev, messages };
-            });
-            setLoadingConversationIds(prev => {
-              const next = new Set(prev);
-              next.delete(targetId);
-              return next;
-            });
-            activeStreamsRef.current.delete(targetId);
-            break;
-
-          case 'stage1_start':
-            updateLastMessage((msg, loading) => {
-              loading.stage1 = true;
-            });
-            break;
-
-          case 'stage1_complete':
-            updateLastMessage((msg, loading) => {
-              msg.stage1 = event.data;
-              loading.stage1 = false;
-            });
-            break;
-
-          case 'axes_complete':
-            updateLastMessage((msg) => {
-              msg.axes = event.data;
-            });
-            break;
-
-          case 'stage2_start':
-            updateLastMessage((msg, loading) => {
-              loading.stage2 = true;
-            });
-            break;
-
-          case 'stage2_complete':
-            updateLastMessage((msg, loading) => {
-              msg.stage2 = event.data;
-              msg.metadata = event.metadata;
-              loading.stage2 = false;
-            });
-            break;
-
-          case 'stage3_start':
-            updateLastMessage((msg, loading) => {
-              loading.stage3 = true;
-            });
-            break;
-
-          case 'stage3_complete':
-            updateLastMessage((msg, loading) => {
-              msg.stage3 = event.data;
-              loading.stage3 = false;
-            });
-            break;
-
-          case 'title_complete':
-            loadConversations();
-            break;
-
-          case 'complete':
-            loadConversations();
-            setLoadingConversationIds(prev => {
-              const next = new Set(prev);
-              next.delete(targetId);
-              return next;
-            });
-            activeStreamsRef.current.delete(targetId);
-            break;
-
-          case 'error':
-            console.error('Stream error:', event.message);
-            setLoadingConversationIds(prev => {
-              const next = new Set(prev);
-              next.delete(targetId);
-              return next;
-            });
-            activeStreamsRef.current.delete(targetId);
-            break;
-
-          default:
-            console.log('Unknown event type:', eventType);
-        }
+        handleCouncilEvent(targetId, eventType, event);
       }, { signal: abortController.signal, skipRewrite: !queryRewriteEnabled });
     } catch (error) {
       if (error.name === 'AbortError') {
@@ -483,28 +486,31 @@ function App() {
 
   const handleCancelStream = () => {
     if (!currentConversationId) return;
+    // Abort the local SSE subscriber
     const controller = activeStreamsRef.current.get(currentConversationId);
     if (controller) {
       controller.abort();
       activeStreamsRef.current.delete(currentConversationId);
-      setLoadingConversationIds(prev => {
-        const next = new Set(prev);
-        next.delete(currentConversationId);
-        return next;
-      });
-      // Mark last assistant message as cancelled
-      setCurrentConversation((prev) => {
-        if (!prev) return prev;
-        const messages = [...prev.messages];
-        const lastMsg = { ...messages[messages.length - 1] };
-        if (lastMsg.role === 'assistant') {
-          lastMsg.loading = { stage0: false, stage1: false, stage2: false, stage3: false };
-          lastMsg.cancelled = true;
-          messages[messages.length - 1] = lastMsg;
-        }
-        return { ...prev, messages };
-      });
     }
+    // Cancel the background task on the server
+    api.cancelTask(currentConversationId).catch(() => {});
+    setLoadingConversationIds(prev => {
+      const next = new Set(prev);
+      next.delete(currentConversationId);
+      return next;
+    });
+    // Mark last assistant message as cancelled
+    setCurrentConversation((prev) => {
+      if (!prev) return prev;
+      const messages = [...prev.messages];
+      const lastMsg = { ...messages[messages.length - 1] };
+      if (lastMsg.role === 'assistant') {
+        lastMsg.loading = { stage0: false, stage1: false, stage2: false, stage3: false };
+        lastMsg.cancelled = true;
+        messages[messages.length - 1] = lastMsg;
+      }
+      return { ...prev, messages };
+    });
   };
 
   const handleClarificationSubmit = async (answers) => {
@@ -534,105 +540,7 @@ function App() {
 
     try {
       await api.sendClarificationStream(currentConversationId, answers, (eventType, event) => {
-        switch (eventType) {
-          case 'stage0_complete':
-            setCurrentConversation((prev) => {
-              if (!prev || prev.id !== targetId) return prev;
-              const messages = [...prev.messages];
-              const lastMsg = { ...messages[messages.length - 1] };
-              lastMsg.rewrittenQuery = event.data.rewritten_query;
-              messages[messages.length - 1] = lastMsg;
-              return { ...prev, messages };
-            });
-            break;
-          case 'stage1_start':
-            setCurrentConversation((prev) => {
-              if (!prev || prev.id !== targetId) return prev;
-              const messages = [...prev.messages];
-              const lastMsg = { ...messages[messages.length - 1] };
-              lastMsg.loading = { ...lastMsg.loading, stage1: true };
-              messages[messages.length - 1] = lastMsg;
-              return { ...prev, messages };
-            });
-            break;
-          case 'stage1_complete':
-            setCurrentConversation((prev) => {
-              if (!prev || prev.id !== targetId) return prev;
-              const messages = [...prev.messages];
-              const lastMsg = { ...messages[messages.length - 1] };
-              lastMsg.stage1 = event.data;
-              lastMsg.loading = { ...lastMsg.loading, stage1: false };
-              messages[messages.length - 1] = lastMsg;
-              return { ...prev, messages };
-            });
-            break;
-          case 'axes_complete':
-            setCurrentConversation((prev) => {
-              if (!prev || prev.id !== targetId) return prev;
-              const messages = [...prev.messages];
-              const lastMsg = { ...messages[messages.length - 1] };
-              lastMsg.axes = event.data;
-              messages[messages.length - 1] = lastMsg;
-              return { ...prev, messages };
-            });
-            break;
-          case 'stage2_start':
-            setCurrentConversation((prev) => {
-              if (!prev || prev.id !== targetId) return prev;
-              const messages = [...prev.messages];
-              const lastMsg = { ...messages[messages.length - 1] };
-              lastMsg.loading = { ...lastMsg.loading, stage2: true };
-              messages[messages.length - 1] = lastMsg;
-              return { ...prev, messages };
-            });
-            break;
-          case 'stage2_complete':
-            setCurrentConversation((prev) => {
-              if (!prev || prev.id !== targetId) return prev;
-              const messages = [...prev.messages];
-              const lastMsg = { ...messages[messages.length - 1] };
-              lastMsg.stage2 = event.data;
-              lastMsg.metadata = event.metadata;
-              lastMsg.loading = { ...lastMsg.loading, stage2: false };
-              messages[messages.length - 1] = lastMsg;
-              return { ...prev, messages };
-            });
-            break;
-          case 'stage3_start':
-            setCurrentConversation((prev) => {
-              if (!prev || prev.id !== targetId) return prev;
-              const messages = [...prev.messages];
-              const lastMsg = { ...messages[messages.length - 1] };
-              lastMsg.loading = { ...lastMsg.loading, stage3: true };
-              messages[messages.length - 1] = lastMsg;
-              return { ...prev, messages };
-            });
-            break;
-          case 'stage3_complete':
-            setCurrentConversation((prev) => {
-              if (!prev || prev.id !== targetId) return prev;
-              const messages = [...prev.messages];
-              const lastMsg = { ...messages[messages.length - 1] };
-              lastMsg.stage3 = event.data;
-              lastMsg.loading = { ...lastMsg.loading, stage3: false };
-              messages[messages.length - 1] = lastMsg;
-              return { ...prev, messages };
-            });
-            break;
-          case 'title_complete':
-            loadConversations();
-            break;
-          case 'complete':
-            loadConversations();
-            removeLoading();
-            break;
-          case 'error':
-            console.error('Stream error:', event.message);
-            removeLoading();
-            break;
-          default:
-            console.log('Unknown event type:', eventType);
-        }
+        handleCouncilEvent(targetId, eventType, event);
       });
     } catch (error) {
       console.error('Failed to send clarification:', error);

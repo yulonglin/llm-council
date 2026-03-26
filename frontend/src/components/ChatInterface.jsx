@@ -231,6 +231,11 @@ export default function ChatInterface({
                       Council run was cancelled.
                     </div>
                   )}
+                  {msg.stale && (
+                    <div className="cancelled-indicator">
+                      Council run was interrupted (server restarted). Partial results shown above.
+                    </div>
+                  )}
                 </div>
               )}
             </div>

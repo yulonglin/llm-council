@@ -13,6 +13,7 @@ from pathlib import Path
 import time as _time
 
 from . import storage
+from . import tasks
 from .council import (
     run_full_council,
     generate_conversation_title,
@@ -229,61 +230,114 @@ async def send_message(conversation_id: str, request: SendMessageRequest):
     }
 
 
-async def _run_stages_1_through_3(conversation_id, msg_index, query, title_task):
-    """Async generator yielding SSE events for stages 1-3 of the council process."""
-    # Stage 1: Collect responses
-    yield f"data: {json.dumps({'type': 'stage1_start'})}\n\n"
-    stage1_results = await stage1_collect_responses(query)
-    storage.update_assistant_message(
-        conversation_id, msg_index, stage1=stage1_results, status="stage1_complete"
-    )
-    yield f"data: {json.dumps({'type': 'stage1_complete', 'data': stage1_results})}\n\n"
+async def _run_council_background(
+    conversation_id: str, msg_index: int, query: str, title_task
+):
+    """Run council stages 1-3 as a background task, broadcasting events via task registry.
 
-    # Stage 2a: Chairman selects evaluation axes
-    axes = await stage2a_select_axes(query)
-    storage.update_assistant_message(conversation_id, msg_index, axes=axes)
-    yield f"data: {json.dumps({'type': 'axes_complete', 'data': axes})}\n\n"
+    This runs independently of any SSE subscriber connections. If all clients
+    disconnect, the task continues to completion and results are persisted to storage.
+    """
+    try:
+        # Stage 1: Collect responses
+        tasks.broadcast(conversation_id, {"type": "stage1_start"})
+        stage1_results = await stage1_collect_responses(query)
+        storage.update_assistant_message(
+            conversation_id, msg_index, stage1=stage1_results, status="stage1_complete"
+        )
+        tasks.broadcast(
+            conversation_id, {"type": "stage1_complete", "data": stage1_results}
+        )
 
-    # Stage 2b: Collect scores
-    yield f"data: {json.dumps({'type': 'stage2_start'})}\n\n"
-    stage2_results, label_to_model = await stage2b_collect_scores(
-        query, stage1_results, axes
-    )
-    aggregate_scores = calculate_aggregate_scores(stage2_results, label_to_model, axes)
-    storage.update_assistant_message(
-        conversation_id, msg_index, stage2=stage2_results, status="stage2_complete"
-    )
-    yield f"data: {json.dumps({'type': 'stage2_complete', 'data': stage2_results, 'metadata': {'label_to_model': label_to_model, 'axes': axes, 'aggregate_scores': aggregate_scores}})}\n\n"
+        # Stage 2a: Chairman selects evaluation axes
+        axes = await stage2a_select_axes(query)
+        storage.update_assistant_message(conversation_id, msg_index, axes=axes)
+        tasks.broadcast(conversation_id, {"type": "axes_complete", "data": axes})
 
-    # Stage 3: Synthesize final answer
-    yield f"data: {json.dumps({'type': 'stage3_start'})}\n\n"
-    stage3_result = await stage3_synthesize_final(
-        query, stage1_results, stage2_results, axes, aggregate_scores
-    )
-    storage.update_assistant_message(
-        conversation_id, msg_index, stage3=stage3_result, status="complete"
-    )
-    yield f"data: {json.dumps({'type': 'stage3_complete', 'data': stage3_result})}\n\n"
+        # Stage 2b: Collect scores
+        tasks.broadcast(conversation_id, {"type": "stage2_start"})
+        stage2_results, label_to_model = await stage2b_collect_scores(
+            query, stage1_results, axes
+        )
+        aggregate_scores = calculate_aggregate_scores(
+            stage2_results, label_to_model, axes
+        )
+        metadata = {
+            "label_to_model": label_to_model,
+            "axes": axes,
+            "aggregate_scores": aggregate_scores,
+        }
+        storage.update_assistant_message(
+            conversation_id,
+            msg_index,
+            stage2=stage2_results,
+            status="stage2_complete",
+            metadata=metadata,
+        )
+        tasks.broadcast(
+            conversation_id,
+            {
+                "type": "stage2_complete",
+                "data": stage2_results,
+                "metadata": metadata,
+            },
+        )
 
-    # Save markdown output
-    metadata = {
-        "axes": axes,
-        "aggregate_scores": aggregate_scores,
-        "label_to_model": label_to_model,
-    }
-    md_path = save_council_markdown(
-        query, stage1_results, stage2_results, stage3_result, metadata
-    )
-    yield f"data: {json.dumps({'type': 'markdown_saved', 'data': {'path': md_path}})}\n\n"
+        # Stage 3: Synthesize final answer
+        tasks.broadcast(conversation_id, {"type": "stage3_start"})
+        stage3_result = await stage3_synthesize_final(
+            query, stage1_results, stage2_results, axes, aggregate_scores
+        )
+        storage.update_assistant_message(
+            conversation_id, msg_index, stage3=stage3_result, status="complete"
+        )
+        tasks.broadcast(
+            conversation_id, {"type": "stage3_complete", "data": stage3_result}
+        )
 
-    # Wait for title generation if it was started
-    if title_task:
-        title = await title_task
-        storage.update_conversation_title(conversation_id, title)
-        yield f"data: {json.dumps({'type': 'title_complete', 'data': {'title': title}})}\n\n"
+        # Save markdown output
+        md_path = save_council_markdown(
+            query, stage1_results, stage2_results, stage3_result, metadata
+        )
+        tasks.broadcast(
+            conversation_id, {"type": "markdown_saved", "data": {"path": md_path}}
+        )
 
-    # Send completion event
-    yield f"data: {json.dumps({'type': 'complete'})}\n\n"
+        # Wait for title generation if it was started
+        if title_task:
+            title = await title_task
+            storage.update_conversation_title(conversation_id, title)
+            tasks.broadcast(
+                conversation_id, {"type": "title_complete", "data": {"title": title}}
+            )
+
+        tasks.broadcast(conversation_id, {"type": "complete"})
+        tasks.complete_task(conversation_id)
+
+    except asyncio.CancelledError:
+        try:
+            storage.update_assistant_message(
+                conversation_id, msg_index, status="cancelled"
+            )
+        except Exception:
+            pass
+        tasks.complete_task(conversation_id, "cancelled")
+    except Exception as e:
+        try:
+            storage.update_assistant_message(
+                conversation_id, msg_index, status="error", error=str(e)
+            )
+        except Exception:
+            pass
+        tasks.broadcast(conversation_id, {"type": "error", "message": str(e)})
+        tasks.complete_task(conversation_id, "error")
+    finally:
+        if title_task and not title_task.done():
+            title_task.cancel()
+            try:
+                await title_task
+            except asyncio.CancelledError:
+                pass
 
 
 class ClarifyRequest(BaseModel):
@@ -296,6 +350,9 @@ class ClarifyRequest(BaseModel):
 async def send_message_stream(conversation_id: str, request: SendMessageRequest):
     """
     Send a message and stream the council process (Stage 0 + Stages 1-3).
+
+    Stage 0 runs inline (may need clarification from client).
+    Stages 1-3 run as a background task that survives client disconnection.
     Returns Server-Sent Events as each stage completes.
     """
     if storage.get_conversation(conversation_id) is None:
@@ -315,7 +372,7 @@ async def send_message_stream(conversation_id: str, request: SendMessageRequest)
                     generate_conversation_title(request.content)
                 )
 
-            # Stage 0: Query analysis (skip if user disabled rewriting)
+            # Stage 0: Query analysis (runs inline — may need clarification)
             if request.skip_rewrite:
                 rewritten_query = request.content
                 yield f"data: {json.dumps({'type': 'stage0_complete', 'data': {'rewritten_query': None, 'skipped': True}})}\n\n"
@@ -340,11 +397,18 @@ async def send_message_stream(conversation_id: str, request: SendMessageRequest)
                 )
                 yield f"data: {json.dumps({'type': 'stage0_complete', 'data': {'rewritten_query': rewritten_query}})}\n\n"
 
-            # Stages 1-3
-            async for event in _run_stages_1_through_3(
-                conversation_id, msg_index, rewritten_query, title_task
-            ):
-                yield event
+            # Register placeholder FIRST, then create task (prevents event drop race)
+            task_state = tasks.register_task(conversation_id)
+            bg_task = asyncio.create_task(
+                _run_council_background(
+                    conversation_id, msg_index, rewritten_query, title_task
+                )
+            )
+            task_state.task = bg_task
+
+            # Subscribe to events from the background task
+            async for event in tasks.subscribe(conversation_id):
+                yield f"data: {json.dumps(event)}\n\n"
 
         except Exception as e:
             if msg_index is not None:
@@ -355,13 +419,6 @@ async def send_message_stream(conversation_id: str, request: SendMessageRequest)
                 except Exception:
                     pass
             yield f"data: {json.dumps({'type': 'error', 'message': str(e)})}\n\n"
-        finally:
-            if title_task and not title_task.done():
-                title_task.cancel()
-                try:
-                    await title_task
-                except asyncio.CancelledError:
-                    pass
 
     return StreamingResponse(
         event_generator(),
@@ -377,7 +434,7 @@ async def send_message_stream(conversation_id: str, request: SendMessageRequest)
 async def send_clarification_stream(conversation_id: str, request: ClarifyRequest):
     """
     Send clarification answers and continue the council process.
-    Returns Server-Sent Events for Stage 0 completion + Stages 1-3.
+    Stage 0 rewrite runs inline, then stages 1-3 run as a background task.
     """
     if storage.get_conversation(conversation_id) is None:
         raise HTTPException(status_code=404, detail="Conversation not found")
@@ -408,7 +465,7 @@ async def send_clarification_stream(conversation_id: str, request: ClarifyReques
                 conv["messages"][msg_index].get("stage0", {}).get("questions", [])
             )
 
-            # Rewrite query with clarification answers
+            # Rewrite query with clarification answers (inline — fast)
             rewritten_query = await stage0_rewrite_with_answers(
                 original_query, questions, request.answers
             )
@@ -427,21 +484,21 @@ async def send_clarification_stream(conversation_id: str, request: ClarifyReques
                     generate_conversation_title(original_query)
                 )
 
-            # Stages 1-3
-            async for event in _run_stages_1_through_3(
-                conversation_id, msg_index, rewritten_query, title_task
-            ):
-                yield event
+            # Register placeholder FIRST, then create task
+            task_state = tasks.register_task(conversation_id)
+            bg_task = asyncio.create_task(
+                _run_council_background(
+                    conversation_id, msg_index, rewritten_query, title_task
+                )
+            )
+            task_state.task = bg_task
+
+            # Subscribe to events from the background task
+            async for event in tasks.subscribe(conversation_id):
+                yield f"data: {json.dumps(event)}\n\n"
 
         except Exception as e:
             yield f"data: {json.dumps({'type': 'error', 'message': str(e)})}\n\n"
-        finally:
-            if title_task and not title_task.done():
-                title_task.cancel()
-                try:
-                    await title_task
-                except asyncio.CancelledError:
-                    pass
 
     return StreamingResponse(
         event_generator(),
@@ -451,6 +508,48 @@ async def send_clarification_stream(conversation_id: str, request: ClarifyReques
             "Connection": "keep-alive",
         },
     )
+
+
+# --- Reconnection & task management endpoints ---
+
+
+@app.get("/api/conversations/{conversation_id}/subscribe")
+async def subscribe_to_task(conversation_id: str):
+    """Subscribe to a running council task's event stream.
+
+    If a task is running, replays buffered events then streams live events.
+    If no task is running, returns a no_active_task event.
+    """
+    if storage.get_conversation(conversation_id) is None:
+        raise HTTPException(status_code=404, detail="Conversation not found")
+
+    async def event_generator():
+        if tasks.get_task(conversation_id):
+            async for event in tasks.subscribe(conversation_id):
+                yield f"data: {json.dumps(event)}\n\n"
+        else:
+            yield f"data: {json.dumps({'type': 'no_active_task'})}\n\n"
+
+    return StreamingResponse(
+        event_generator(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "Connection": "keep-alive"},
+    )
+
+
+@app.post("/api/conversations/{conversation_id}/cancel")
+async def cancel_council_task(conversation_id: str):
+    """Cancel a running council task."""
+    cancelled = tasks.cancel_task(conversation_id)
+    if not cancelled:
+        raise HTTPException(status_code=404, detail="No running task to cancel")
+    return {"cancelled": True}
+
+
+@app.get("/api/conversations/{conversation_id}/task-status")
+async def get_task_status(conversation_id: str):
+    """Check if a council task is running for this conversation."""
+    return {"running": tasks.is_running(conversation_id)}
 
 
 if __name__ == "__main__":
